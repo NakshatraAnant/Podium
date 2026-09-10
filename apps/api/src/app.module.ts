@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { AuthModule } from "./auth/auth.module";
+import { ChatModule } from "./chat/chat.module";
 import { CitiesModule } from "./cities/cities.module";
 import { ClientsModule } from "./clients/clients.module";
 import { CommonModule } from "./common/common.module";
@@ -13,6 +14,7 @@ import { PermissionsGuard } from "./common/guards/permissions.guard";
 import { AuditInterceptor } from "./common/interceptors/audit.interceptor";
 import { PrismaModule } from "./common/prisma/prisma.module";
 import { FlowsModule } from "./flows/flows.module";
+import { GovernanceModule } from "./governance/governance.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { InvoicesModule } from "./invoices/invoices.module";
 import { ProjectsModule } from "./projects/projects.module";
@@ -27,6 +29,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     PrismaModule,
     CommonModule,
     AuthModule,
+    ChatModule,
     UsersModule,
     CitiesModule,
     ClientsModule,
@@ -34,6 +37,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     ProjectsModule,
     TasksModule,
     FlowsModule,
+    GovernanceModule,
     InventoryModule,
     InvoicesModule,
     VendorsModule,

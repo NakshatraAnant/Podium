@@ -64,8 +64,8 @@ const ROLE_NAMES = [
 const RESOURCES = [
   "projects", "tasks", "flows", "clients", "leads", "vendors", "invoices",
   "payments", "budgets", "expenses", "inventory", "purchase_requests",
-  "approvals", "licences", "documents", "reports", "settings", "automation",
-  "audit_logs", "people",
+  "approvals", "licences", "risks", "documents", "reports", "settings",
+  "automation", "audit_logs", "people",
 ];
 const ACTIONS = ["view", "create", "edit", "delete", "approve", "export"];
 
