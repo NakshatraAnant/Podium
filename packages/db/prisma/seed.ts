@@ -11,8 +11,16 @@
  * is in your local `.env`; make sure that's your dev database.
  */
 import { PrismaClient, Prisma } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 const db = new PrismaClient();
+
+/**
+ * Every seeded user gets this password in dev/demo environments only —
+ * printed at the end of the seed run. Never used for anything but local
+ * development; production onboarding goes through real invites (Phase 1).
+ */
+const DEV_PASSWORD = "Podium123!";
 
 // ---------------------------------------------------------------------------
 // GST state codes — full 36 Indian states/UTs (blueprint §10), not just the
@@ -337,8 +345,15 @@ async function main() {
     Finance: ["invoices", "payments", "budgets", "expenses", "reports"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`))
       .concat(["approvals:approve", "approvals:view", "projects:view"]),
     Sales: ["leads", "clients"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
-    Creative: ["tasks:view", "tasks:edit", "documents:view", "documents:create", "approvals:approve"],
-    Employee: ["tasks:view", "tasks:edit", "documents:view"],
+    // Creative/Employee get flows:view (not flows:edit) so the PermissionsGuard
+    // lets them into flow-step endpoints at all; FlowsService then enforces the
+    // real, row-level check — only the step's assigned owner (or a flows:edit
+    // holder acting as manager override) may start/complete/reassign it. This
+    // is deliberate: broad role grants decide "can reach this endpoint family",
+    // per-row ownership decides "can act on this specific step" (blueprint §11's
+    // "(user, action, resource, resource_row)" model).
+    Creative: ["tasks:view", "tasks:edit", "flows:view", "documents:view", "documents:create", "approvals:approve"],
+    Employee: ["tasks:view", "tasks:edit", "flows:view", "documents:view"],
     Client: ["invoices:view", "approvals:view", "approvals:approve", "documents:view"],
     Vendor: ["invoices:view", "payments:view", "documents:view"],
   };
@@ -351,6 +366,7 @@ async function main() {
   }
 
   // --- users --------------------------------------------------------------
+  const passwordHash = await bcrypt.hash(DEV_PASSWORD, 10);
   const userByKey: Record<string, Awaited<ReturnType<typeof db.user.create>>> = {};
   for (const u of TEAM) {
     const email = u.name.toLowerCase().split(" ").join(".") + "@ammbrands.in";
@@ -360,6 +376,7 @@ async function main() {
         workspaceId: workspace.id,
         name: u.name,
         email,
+        passwordHash,
         dept: u.dept,
         primaryRoleId: rbacRole.id,
         primaryCityId: cityByKey[u.city].id,
@@ -820,6 +837,8 @@ async function main() {
     invoices: INVOICES.length,
     flowTemplates: FLOW_TEMPLATES.length,
   });
+  console.log(`\nAll seeded users share the dev-only password: ${DEV_PASSWORD}`);
+  console.log("e.g. anant.sharma@ammbrands.in / " + DEV_PASSWORD + " (Founder, all-city access)");
 }
 
 main()

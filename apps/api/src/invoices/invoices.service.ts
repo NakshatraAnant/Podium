@@ -1,0 +1,183 @@
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { Prisma, type PrismaClient } from "@podium/db";
+import { randomUUID } from "crypto";
+import type { CreateAdjustmentNoteInput, CreateInvoiceInput, RecordPaymentInput } from "@podium/shared-types";
+import { CityScopeService } from "../common/city-scope/city-scope.service";
+import { PrismaService } from "../common/prisma/prisma.service";
+import type { RequestUser } from "../common/types";
+
+type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+
+const GST_RATE = 0.18;
+
+function financialYearFor(date: Date): string {
+  const y = date.getUTCFullYear();
+  const startYear = date.getUTCMonth() >= 3 ? y : y - 1; // Indian FY: Apr-Mar
+  return `${String(startYear).slice(2)}-${String(startYear + 1).slice(2)}`;
+}
+
+/**
+ * The invoice engine (blueprint §17). Two rules are load-bearing and must
+ * never be relaxed:
+ *  1. Numbering (AMM/{CITY}/{FY}/{SEQ}) is sequential per city per FY and
+ *     gap-free — the counter row is locked (SELECT ... FOR UPDATE) in the
+ *     same transaction that mints the number, so two concurrent "issue"
+ *     calls for the same city/FY can never collide or skip.
+ *  2. An ISSUED invoice is immutable. There is no update path for its
+ *     items/amounts once issued — corrections are a credit_note or
+ *     debit_note, always. This service does not expose an "edit issued
+ *     invoice" method at all, not even a guarded one.
+ */
+@Injectable()
+export class InvoicesService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cityScope: CityScopeService,
+  ) {}
+
+  list(user: RequestUser, cityId?: string) {
+    const scope = this.cityScope.scopeFilter(user, cityId);
+    return this.prisma.client.invoice.findMany({
+      where: { workspaceId: user.workspaceId, deletedAt: null, ...scope },
+      include: { items: true, payments: true, client: true, project: true },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  async get(user: RequestUser, id: string) {
+    const invoice = await this.prisma.client.invoice.findFirst({
+      where: { id, workspaceId: user.workspaceId, deletedAt: null },
+      include: { items: true, payments: true, creditNotes: true, debitNotes: true, client: true, project: true, city: true },
+    });
+    if (!invoice) throw new NotFoundException("Invoice not found.");
+    this.cityScope.assertCanAccessCity(user, invoice.cityId);
+    return invoice;
+  }
+
+  /** Creates a DRAFT invoice — no number is minted, nothing is final, still freely editable via delete+recreate. */
+  async create(user: RequestUser, input: CreateInvoiceInput, idempotencyKey?: string) {
+    if (idempotencyKey) {
+      const existing = await this.prisma.client.invoice.findUnique({ where: { idempotencyKey } });
+      if (existing) return existing;
+    }
+    this.cityScope.assertCanAccessCity(user, input.cityId);
+    const client = await this.prisma.client.client.findUniqueOrThrow({ where: { id: input.clientId } });
+    const taxable = input.items.reduce((s, i) => s + i.qty * i.rate, 0);
+
+    return this.prisma.client.invoice.create({
+      data: {
+        workspaceId: user.workspaceId,
+        invoiceNo: `DRAFT-${Date.now()}`, // placeholder, replaced by a real number on issue
+        clientId: input.clientId,
+        projectId: input.projectId,
+        cityId: input.cityId,
+        dueDate: input.dueDate,
+        status: "DRAFT",
+        placeOfSupply: client.gstStateCode ?? "",
+        taxableAmount: taxable,
+        idempotencyKey,
+        items: { create: input.items.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate, hsnSac: i.hsnSac })) },
+        createdById: user.id,
+      },
+      include: { items: true },
+    });
+  }
+
+  /**
+   * Locks the invoice number, computes the final GST split from the
+   * issuing city's GST state code vs. the client's, and flips DRAFT -> ISSUED.
+   * From this point on the invoice is immutable — see class doc.
+   */
+  async issue(user: RequestUser, id: string) {
+    return this.prisma.client.$transaction(async (tx) => {
+      const invoice = await tx.invoice.findFirst({ where: { id, workspaceId: user.workspaceId, deletedAt: null }, include: { items: true, city: true, client: true } });
+      if (!invoice) throw new NotFoundException("Invoice not found.");
+      this.cityScope.assertCanAccessCity(user, invoice.cityId);
+      if (invoice.status !== "DRAFT") {
+        throw new ConflictException(`Invoice is already ${invoice.status} — only a DRAFT invoice can be issued.`);
+      }
+      if (!invoice.client.gstStateCode) {
+        throw new BadRequestException("Client has no GST state code on file — cannot determine place of supply.");
+      }
+
+      const invoiceNo = await this.mintInvoiceNumber(tx, user.workspaceId, invoice.cityId, invoice.city.code, new Date());
+      const taxable = invoice.items.reduce((s, i) => s + i.qty.toNumber() * i.rate.toNumber(), 0);
+      const intra = invoice.city.gstStateCode === invoice.client.gstStateCode;
+      const tax = Math.round(taxable * GST_RATE);
+      const cgst = intra ? tax / 2 : 0;
+      const sgst = intra ? tax / 2 : 0;
+      const igst = intra ? 0 : tax;
+
+      return tx.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          invoiceNo,
+          issueDate: new Date(),
+          status: "ISSUED",
+          placeOfSupply: invoice.client.gstStateCode,
+          taxableAmount: taxable,
+          cgst, sgst, igst,
+          total: taxable + tax,
+        },
+        include: { items: true },
+      });
+    });
+  }
+
+  /** Sequential, gap-free, never-reused numbering per city per financial year — locked under the same transaction as the invoice update. */
+  private async mintInvoiceNumber(tx: Tx, workspaceId: string, cityId: string, cityCode: string, at: Date): Promise<string> {
+    const fy = financialYearFor(at);
+    await tx.$executeRaw(
+      Prisma.sql`INSERT INTO invoice_counters (id, workspace_id, city_id, financial_year, last_sequence)
+                 VALUES (${randomUUID()}::uuid, ${workspaceId}::uuid, ${cityId}::uuid, ${fy}, 0)
+                 ON CONFLICT (city_id, financial_year) DO NOTHING`,
+    );
+    const [locked] = await tx.$queryRaw<Array<{ last_sequence: number }>>(
+      Prisma.sql`SELECT last_sequence FROM invoice_counters WHERE city_id = ${cityId}::uuid AND financial_year = ${fy} FOR UPDATE`,
+    );
+    const nextSeq = (locked?.last_sequence ?? 0) + 1;
+    await tx.$executeRaw(
+      Prisma.sql`UPDATE invoice_counters SET last_sequence = ${nextSeq} WHERE city_id = ${cityId}::uuid AND financial_year = ${fy}`,
+    );
+    return `AMM/${cityCode}/${fy}/${String(nextSeq).padStart(4, "0")}`;
+  }
+
+  async recordPayment(user: RequestUser, invoiceId: string, input: RecordPaymentInput, idempotencyKey?: string) {
+    if (idempotencyKey) {
+      const existing = await this.prisma.client.payment.findUnique({ where: { idempotencyKey } });
+      if (existing) return existing;
+    }
+    return this.prisma.client.$transaction(async (tx) => {
+      const invoice = await tx.invoice.findFirst({ where: { id: invoiceId, workspaceId: user.workspaceId, deletedAt: null }, include: { payments: true } });
+      if (!invoice) throw new NotFoundException("Invoice not found.");
+      this.cityScope.assertCanAccessCity(user, invoice.cityId);
+      if (invoice.status === "DRAFT" || invoice.status === "CANCELLED") {
+        throw new BadRequestException(`Cannot record a payment against a ${invoice.status} invoice.`);
+      }
+
+      const payment = await tx.payment.create({
+        data: { invoiceId, amount: input.amount, method: input.method, receivedAt: input.receivedAt ?? new Date(), createdById: user.id, idempotencyKey },
+      });
+
+      const totalPaid = invoice.payments.reduce((s, p) => s + p.amount.toNumber(), 0) + input.amount;
+      const total = invoice.total.toNumber();
+      const status = totalPaid >= total ? "PAID" : totalPaid > 0 ? "PARTIALLY_PAID" : invoice.status;
+      await tx.invoice.update({ where: { id: invoiceId }, data: { status } });
+
+      return payment;
+    });
+  }
+
+  /** Corrections to an ISSUED invoice — never an UPDATE on the invoice row itself. */
+  async createCreditNote(user: RequestUser, invoiceId: string, input: CreateAdjustmentNoteInput) {
+    const invoice = await this.get(user, invoiceId);
+    if (invoice.status === "DRAFT") throw new BadRequestException("Credit notes apply to issued invoices only — edit the draft directly instead.");
+    return this.prisma.client.creditNote.create({ data: { invoiceId, amount: input.amount, reason: input.reason, createdById: user.id } });
+  }
+
+  async createDebitNote(user: RequestUser, invoiceId: string, input: CreateAdjustmentNoteInput) {
+    const invoice = await this.get(user, invoiceId);
+    if (invoice.status === "DRAFT") throw new BadRequestException("Debit notes apply to issued invoices only — edit the draft directly instead.");
+    return this.prisma.client.debitNote.create({ data: { invoiceId, amount: input.amount, reason: input.reason, createdById: user.id } });
+  }
+}

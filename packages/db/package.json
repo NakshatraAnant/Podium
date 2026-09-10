@@ -19,9 +19,11 @@
     "seed": "ts-node --transpile-only prisma/seed.ts"
   },
   "dependencies": {
-    "@prisma/client": "^5.19.1"
+    "@prisma/client": "^5.19.1",
+    "bcryptjs": "^2.4.3"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "prisma": "^5.19.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4",
