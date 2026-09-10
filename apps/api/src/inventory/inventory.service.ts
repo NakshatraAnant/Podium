@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@podium/db";
 import type { CreateMovementInput } from "@podium/shared-types";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
