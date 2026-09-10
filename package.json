@@ -1,0 +1,28 @@
+{
+  "name": "podium-v2",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Podium v2 — production operating system for AMM Brands LLP",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev:api": "pnpm --filter @podium/api dev",
+    "dev:web": "pnpm --filter @podium/web dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:generate": "pnpm --filter @podium/db generate",
+    "db:migrate": "pnpm --filter @podium/db migrate",
+    "db:seed": "pnpm --filter @podium/db seed",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "prettier": "^3.3.3"
+  }
+}
