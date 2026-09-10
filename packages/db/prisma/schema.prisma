@@ -1,0 +1,1669 @@
+// Podium v2 — Prisma schema
+// Source of truth: docs/PODIUM-V2-PRODUCTION-BLUEPRINT.md §9, cross-checked
+// against docs/prototype/podium-v2-amm-brands.html.
+//
+// Conventions (blueprint §39 / prompt §6):
+//  - snake_case in the DB (via @map/@@map), camelCase in Prisma Client.
+//  - Every table has id/createdAt/updatedAt/createdById/updatedById/deletedAt.
+//    createdById/updatedById are plain UUID columns (not enforced FK relations)
+//    to avoid ~120 named self-relations to User across 60 tables — the
+//    authoritative attribution trail is `audit_logs`, written by a shared
+//    interceptor on every mutation (see apps/api/src/common/audit). This is a
+//    documented judgment call, logged in docs/STATUS.md.
+//  - `workspaceId` is carried on every root aggregate (never inferred) so
+//    every query can be scoped by tenant even with one tenant today (blueprint §30).
+//  - Soft delete via `deletedAt`; nothing is ever hard-deleted except
+//    ephemeral/session-like rows (idempotency_keys).
+//  - Money stored as Decimal(14,2) (INR, no currency column yet — single-currency
+//    business; flag before adding multi-currency).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// ENUMS
+// =========================================================================
+
+enum ClientType {
+  INDIVIDUAL
+  CORPORATE
+  BRAND
+}
+
+enum LeadStage {
+  LEAD
+  QUALIFIED
+  PROPOSAL
+  NEGOTIATION
+  WON
+  LOST // [REQUIRED] — absent from prototype's CRM_STAGES, needed for pipeline forecasting (blueprint §18)
+}
+
+enum VendorStatus {
+  PREFERRED
+  APPROVED
+  BLACKLISTED
+}
+
+enum ProjectStatus {
+  PLANNING
+  PLANNED
+  IN_PROGRESS
+  CLIENT_REVIEW
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum ProjectHealth {
+  GREEN
+  AMBER
+  RED
+}
+
+enum ProjectMemberRole {
+  PROJECT_MANAGER
+  TEAM_MEMBER
+  OBSERVER
+}
+
+enum TaskStatus {
+  BACKLOG
+  PLANNED
+  IN_PROGRESS
+  CLIENT_REVIEW
+  APPROVED
+  COMPLETED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum FlowInstanceStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum FlowStepStatus {
+  LOCKED
+  READY
+  ACTIVE
+  COMPLETED
+  BLOCKED
+  ESCALATED
+  CANCELLED
+  FAILED
+}
+
+enum JoinType {
+  AND
+  OR
+}
+
+enum InventoryMovementType {
+  PURCHASE
+  RECEIVE
+  RESERVE
+  CONSUME
+  TRANSFER_OUT
+  TRANSFER_IN
+  DAMAGE
+  ADJUSTMENT
+  RETURN
+}
+
+enum ReservationStatus {
+  RESERVED
+  CONSUMED
+  RELEASED
+}
+
+enum PurchaseRequestStatus {
+  QUOTE_COMPARISON
+  RFQ_SENT
+  APPROVAL_PENDING
+  PO_RAISED
+  GOODS_RECEIVED
+  REJECTED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SENT
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum ExpenseStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REIMBURSED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  CARD
+  OTHER
+}
+
+enum AdjustmentNoteType {
+  CREDIT
+  DEBIT
+}
+
+enum LicenceStatus {
+  NOT_APPLIED
+  APPLIED
+  APPROVED
+  REJECTED
+}
+
+enum RiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RiskStatus {
+  OPEN
+  MITIGATING
+  MONITORING
+  CLOSED
+}
+
+enum ApprovalType {
+  CREATIVE
+  BUDGET
+  PURCHASE
+  CLIENT
+  VENDOR
+  PAYMENT
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ChannelKind {
+  COMPANY
+  CITY
+  PROJECT
+  DM
+}
+
+enum DocumentType {
+  CONTRACT
+  DESIGN
+  CREATIVE
+  PURCHASE_ORDER
+  GOVERNMENT_PERMIT
+  GUEST_LIST
+  OTHER
+}
+
+enum CityAccessScope {
+  READ
+  WRITE
+  ALL // explicit "all cities" grant — never the absence of a filter (blueprint §10)
+}
+
+enum LeaveType {
+  CASUAL
+  EARNED
+  SICK
+  OTHER
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ON_SITE
+  REMOTE
+  ON_LEAVE
+}
+
+enum AutomationRunStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  RETRYING
+}
+
+enum IncidentSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// =========================================================================
+// WORKSPACE / TENANT ROOT
+// =========================================================================
+
+model Workspace {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String
+  gstin     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  cities            City[]
+  users             User[]
+  roles             Role[]
+  permissions       Permission[]
+  clients           Client[]
+  vendors           Vendor[]
+  leads             Lead[]
+  playbooks         Playbook[]
+  projects          Project[]
+  flowTemplates     FlowTemplate[]
+  inventoryItems    InventoryItem[]
+  recipes           Recipe[]
+  invoiceCounters   InvoiceCounter[]
+  licences          Licence[]
+  channels          Channel[]
+  sops              Sop[]
+  automationRules   AutomationRule[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  documents         Document[]
+  freelancers       Freelancer[]
+  invoices          Invoice[]
+
+  @@map("workspaces")
+}
+
+// =========================================================================
+// CITIES / GST REFERENCE
+// =========================================================================
+
+model City {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  name        String
+  code        String // e.g. JPR, UDR, DEL, BOM, BLR, GOA
+  state       String
+  gstStateCode String   @map("gst_state_code") // e.g. "08" Rajasthan — see GstStateCode for the full 36-code reference
+  isHq        Boolean   @default(false) @map("is_hq")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  createdById String?   @map("created_by") @db.Uuid
+  updatedById String?   @map("updated_by") @db.Uuid
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id])
+  clients              Client[]
+  vendors              Vendor[]
+  projects             Project[]
+  invoices             Invoice[]
+  licences             Licence[]
+  inventoryLocations   InventoryLocation[]
+  channels             Channel[]
+  userCityAccess       UserCityAccess[]
+  invoiceCounters      InvoiceCounter[]
+  leads                Lead[]
+  freelancers          Freelancer[]
+  usersPrimary         User[]                @relation("UserPrimaryCity")
+
+  @@unique([workspaceId, code])
+  @@map("cities")
+}
+
+/// Full GST state-code reference table (all 36 Indian states/UTs), so a new
+/// operating city is a data row, never a code change (blueprint §10).
+model GstStateCode {
+  code  String @id // e.g. "08"
+  state String @unique
+
+  @@map("gst_state_codes")
+}
+
+// =========================================================================
+// USERS / RBAC
+// =========================================================================
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  workspaceId    String    @map("workspace_id") @db.Uuid
+  name           String
+  email          String    @unique
+  passwordHash   String?   @map("password_hash")
+  googleSub      String?   @unique @map("google_sub")
+  dept           String?
+  primaryRoleId  String?   @map("primary_role_id") @db.Uuid
+  primaryCityId  String?   @map("primary_city_id") @db.Uuid
+  isExternal     Boolean   @default(false) @map("is_external") // true for CLIENT/VENDOR portal users
+  externalClientId String? @map("external_client_id") @db.Uuid
+  externalVendorId String? @map("external_vendor_id") @db.Uuid
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  createdById    String?   @map("created_by") @db.Uuid
+  updatedById    String?   @map("updated_by") @db.Uuid
+  deletedAt      DateTime? @map("deleted_at")
+
+  workspace          Workspace         @relation(fields: [workspaceId], references: [id])
+  primaryRole        Role?             @relation("UserPrimaryRole", fields: [primaryRoleId], references: [id])
+  primaryCity        City?             @relation("UserPrimaryCity", fields: [primaryCityId], references: [id])
+  userRoles          UserRole[]
+  cityAccess         UserCityAccess[]
+  refreshTokens      RefreshToken[]
+  projectsAsPm       Project[]         @relation("ProjectPM")
+  projectMembers     ProjectMember[]
+  tasksOwned         Task[]            @relation("TaskOwner")
+  flowStepsOwned     FlowStep[]        @relation("FlowStepOwner")
+  expenses           Expense[]
+  leavesRequested    Leave[]
+  attendance         Attendance?
+  notifications      Notification[]
+  messages           Message[]
+  channelMemberships ChannelMember[]
+  auditLogs          AuditLog[]
+  leadsOwned         Lead[]            @relation("LeadOwner")
+  licencesOwned      Licence[]         @relation("LicenceOwner")
+  risksOwned         Risk[]            @relation("RiskOwner")
+
+  @@map("users")
+}
+
+model Role {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  name        String // Founder, Admin, Project Manager, Operations, Finance, Sales, Creative, Employee, Client, Vendor
+  description String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id])
+  usersPrimary    User[]           @relation("UserPrimaryRole")
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+
+  @@unique([workspaceId, name])
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  resource    String // e.g. "projects", "invoices", "inventory_movements"
+  action      String // view | create | edit | delete | approve | export
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id])
+  rolePermissions RolePermission[]
+
+  @@unique([workspaceId, resource, action])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+/// Which cities a user may act in. "All cities" is an explicit ALL-scope grant,
+/// never the absence of a row (blueprint §10). cityId is null exactly when
+/// scope = ALL.
+model UserCityAccess {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String          @map("user_id") @db.Uuid
+  cityId    String?         @map("city_id") @db.Uuid
+  scope     CityAccessScope
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  user User  @relation(fields: [userId], references: [id])
+  city City? @relation(fields: [cityId], references: [id])
+
+  @@unique([userId, cityId])
+  @@index([userId])
+  @@map("user_city_access")
+}
+
+model RefreshToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  tokenHash   String    @unique @map("token_hash")
+  expiresAt   DateTime  @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// =========================================================================
+// CLIENTS / VENDORS / CRM
+// =========================================================================
+
+model Client {
+  id          String     @id @default(uuid()) @db.Uuid
+  workspaceId String     @map("workspace_id") @db.Uuid
+  name        String
+  type        ClientType
+  cityId      String     @map("city_id") @db.Uuid
+  gstin       String?
+  gstStateCode String?   @map("gst_state_code")
+  ltv         Decimal    @default(0) @db.Decimal(14, 2)
+  since       DateTime?
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  createdById String?    @map("created_by") @db.Uuid
+  updatedById String?    @map("updated_by") @db.Uuid
+  deletedAt   DateTime?  @map("deleted_at")
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id])
+  city      City            @relation(fields: [cityId], references: [id])
+  contacts  ClientContact[]
+  projects  Project[]
+  leads     Lead[]
+  invoices  Invoice[]
+
+  @@index([workspaceId, cityId])
+  @@map("clients")
+}
+
+model ClientContact {
+  id        String    @id @default(uuid()) @db.Uuid
+  clientId  String    @map("client_id") @db.Uuid
+  name      String
+  phone     String?
+  email     String?
+  role      String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  client Client @relation(fields: [clientId], references: [id])
+
+  @@index([clientId])
+  @@map("client_contacts")
+}
+
+model Lead {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  name        String
+  stage       LeadStage @default(LEAD)
+  value       Decimal   @db.Decimal(14, 2)
+  ownerId     String    @map("owner_id") @db.Uuid
+  cityId      String    @map("city_id") @db.Uuid
+  convertedClientId String? @map("converted_client_id") @db.Uuid
+  convertedProjectId String? @map("converted_project_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  createdById String?   @map("created_by") @db.Uuid
+  updatedById String?   @map("updated_by") @db.Uuid
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace         Workspace @relation(fields: [workspaceId], references: [id])
+  owner             User      @relation("LeadOwner", fields: [ownerId], references: [id])
+  city              City      @relation(fields: [cityId], references: [id])
+  convertedClient   Client?   @relation(fields: [convertedClientId], references: [id])
+
+  @@index([workspaceId, stage])
+  @@map("leads")
+}
+
+model Vendor {
+  id          String       @id @default(uuid()) @db.Uuid
+  workspaceId String       @map("workspace_id") @db.Uuid
+  name        String
+  category    String
+  cityId      String       @map("city_id") @db.Uuid
+  rating      Decimal?     @db.Decimal(2, 1)
+  gstin       String?
+  status      VendorStatus @default(APPROVED)
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  createdById String?      @map("created_by") @db.Uuid
+  updatedById String?      @map("updated_by") @db.Uuid
+  deletedAt   DateTime?    @map("deleted_at")
+
+  workspace         Workspace          @relation(fields: [workspaceId], references: [id])
+  city              City               @relation(fields: [cityId], references: [id])
+  contacts          VendorContact[]
+  projectVendors    ProjectVendor[]
+  purchaseRequests  PurchaseRequest[]
+  purchaseOrders    PurchaseOrder[]
+  inventoryItems    InventoryItem[]
+
+  @@index([workspaceId, cityId])
+  @@map("vendors")
+}
+
+model VendorContact {
+  id        String    @id @default(uuid()) @db.Uuid
+  vendorId  String    @map("vendor_id") @db.Uuid
+  name      String
+  phone     String?
+  email     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+
+  @@index([vendorId])
+  @@map("vendor_contacts")
+}
+
+// =========================================================================
+// PLAYBOOKS / PROJECTS
+// =========================================================================
+
+model Playbook {
+  id                  String    @id @default(uuid()) @db.Uuid
+  workspaceId         String    @map("workspace_id") @db.Uuid
+  name                String
+  eventType           String    @map("event_type")
+  defaultStages       Json      @map("default_stages")
+  defaultTasks        Json      @map("default_tasks")
+  defaultFlowTemplateIds String[] @map("default_flow_template_ids") @db.Uuid
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+  createdById         String?   @map("created_by") @db.Uuid
+  updatedById         String?   @map("updated_by") @db.Uuid
+  deletedAt           DateTime? @map("deleted_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  projects  Project[]
+
+  @@map("playbooks")
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @map("workspace_id") @db.Uuid
+  name        String
+  clientId    String        @map("client_id") @db.Uuid
+  playbookId  String?       @map("playbook_id") @db.Uuid
+  type        String
+  cityId      String        @map("city_id") @db.Uuid
+  eventDate   DateTime      @map("event_date")
+  pmId        String        @map("pm_id") @db.Uuid
+  status      ProjectStatus @default(PLANNING)
+  health      ProjectHealth @default(GREEN) // computed, recalculated server-side (blueprint §19) — never client-set
+  revenue     Decimal       @default(0) @db.Decimal(14, 2)
+  estCost     Decimal       @default(0) @map("est_cost") @db.Decimal(14, 2)
+  actCost     Decimal       @default(0) @map("act_cost") @db.Decimal(14, 2)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+  createdById String?       @map("created_by") @db.Uuid
+  updatedById String?       @map("updated_by") @db.Uuid
+  deletedAt   DateTime?     @map("deleted_at")
+
+  workspace       Workspace         @relation(fields: [workspaceId], references: [id])
+  client          Client            @relation(fields: [clientId], references: [id])
+  playbook        Playbook?         @relation(fields: [playbookId], references: [id])
+  city            City              @relation(fields: [cityId], references: [id])
+  pm              User              @relation("ProjectPM", fields: [pmId], references: [id])
+  members         ProjectMember[]
+  vendors         ProjectVendor[]
+  tasks           Task[]
+  flowInstances   FlowInstance[]
+  invoices        Invoice[]
+  expenses        Expense[]
+  risks           Risk[]
+  approvals       Approval[]
+  documents       Document[]
+  licences        Licence[]
+  budgets         Budget[]
+  purchaseRequests PurchaseRequest[]
+  inventoryReservations InventoryReservation[]
+  channels        Channel[]
+  meetings        Meeting[]
+  runsheets       Runsheet[]
+  eventDayCheckins EventDayCheckin[]
+  eventDayIncidents EventDayIncident[]
+  emails          Email[]
+
+  @@index([workspaceId, cityId, status])
+  @@map("projects")
+}
+
+model ProjectMember {
+  id           String            @id @default(uuid()) @db.Uuid
+  projectId    String            @map("project_id") @db.Uuid
+  userId       String            @map("user_id") @db.Uuid
+  roleOnProject ProjectMemberRole @default(TEAM_MEMBER) @map("role_on_project")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  deletedAt    DateTime?         @map("deleted_at")
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+model ProjectVendor {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String    @map("project_id") @db.Uuid
+  vendorId  String    @map("vendor_id") @db.Uuid
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  project Project @relation(fields: [projectId], references: [id])
+  vendor  Vendor  @relation(fields: [vendorId], references: [id])
+
+  @@unique([projectId, vendorId])
+  @@map("project_vendors")
+}
+
+// =========================================================================
+// TASKS
+// =========================================================================
+
+model Task {
+  id          String       @id @default(uuid()) @db.Uuid
+  projectId   String       @map("project_id") @db.Uuid
+  name        String
+  ownerId     String       @map("owner_id") @db.Uuid
+  dueAt       DateTime?    @map("due_at")
+  status      TaskStatus   @default(BACKLOG)
+  priority    TaskPriority @default(MEDIUM)
+  sourceMessageId String?  @map("source_message_id") @db.Uuid // set when created via chat @mention
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  createdById String?      @map("created_by") @db.Uuid
+  updatedById String?      @map("updated_by") @db.Uuid
+  deletedAt   DateTime?    @map("deleted_at")
+
+  project      Project            @relation(fields: [projectId], references: [id])
+  owner        User               @relation("TaskOwner", fields: [ownerId], references: [id])
+  dependencies TaskDependency[]   @relation("TaskDependent")
+  dependents   TaskDependency[]   @relation("TaskDependsOn")
+
+  @@index([projectId, status])
+  @@map("tasks")
+}
+
+model TaskDependency {
+  id            String @id @default(uuid()) @db.Uuid
+  taskId        String @map("task_id") @db.Uuid
+  dependsOnTaskId String @map("depends_on_task_id") @db.Uuid
+
+  task        Task @relation("TaskDependent", fields: [taskId], references: [id])
+  dependsOnTask Task @relation("TaskDependsOn", fields: [dependsOnTaskId], references: [id])
+
+  @@unique([taskId, dependsOnTaskId])
+  @@map("task_dependencies")
+}
+
+// =========================================================================
+// FLOW ENGINE — the platform's differentiator (blueprint §6)
+// =========================================================================
+
+/// Reusable flow definition. `steps` jsonb mirrors the prototype's
+/// FLOW_TEMPLATES shape (key, name, role, default owner role, sla minutes,
+/// deps[]) for import/export and playbook authoring convenience; the
+/// authoritative, queryable structure once instantiated is FlowStep +
+/// FlowStepDependency below — jsonb here is a template, not the runtime model.
+model FlowTemplate {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  name        String
+  category    String
+  description String?
+  steps       Json // [{key, name, role, ownerRole, slaMinutes, deps: [key,...]}]
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  createdById String?   @map("created_by") @db.Uuid
+  updatedById String?   @map("updated_by") @db.Uuid
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id])
+  flowInstances FlowInstance[]
+
+  @@map("flow_templates")
+}
+
+model FlowInstance {
+  id         String             @id @default(uuid()) @db.Uuid
+  templateId String             @map("template_id") @db.Uuid
+  projectId  String             @map("project_id") @db.Uuid
+  name       String
+  status     FlowInstanceStatus @default(ACTIVE)
+  createdAt  DateTime           @default(now()) @map("created_at")
+  updatedAt  DateTime           @updatedAt @map("updated_at")
+  createdById String?           @map("created_by") @db.Uuid
+  deletedAt  DateTime?          @map("deleted_at")
+
+  template FlowTemplate @relation(fields: [templateId], references: [id])
+  project  Project      @relation(fields: [projectId], references: [id])
+  steps    FlowStep[]
+
+  @@index([projectId, status])
+  @@map("flow_instances")
+}
+
+model FlowStep {
+  id             String         @id @default(uuid()) @db.Uuid
+  flowInstanceId String         @map("flow_instance_id") @db.Uuid
+  key            String // matches template step key, e.g. 'a','b','c'
+  name           String
+  role           String
+  ownerId        String         @map("owner_id") @db.Uuid
+  slaMinutes     Int            @map("sla_minutes")
+  status         FlowStepStatus @default(LOCKED)
+  readyAt        DateTime?      @map("ready_at")
+  startedAt      DateTime?      @map("started_at")
+  doneAt         DateTime?      @map("done_at")
+  note           String?
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+  deletedAt      DateTime?      @map("deleted_at")
+
+  flowInstance FlowInstance          @relation(fields: [flowInstanceId], references: [id])
+  owner        User                  @relation("FlowStepOwner", fields: [ownerId], references: [id])
+  dependsOn    FlowStepDependency[]  @relation("StepDependent")
+  dependents   FlowStepDependency[]  @relation("StepDependsOn")
+  runs         FlowStepRun[]
+
+  @@unique([flowInstanceId, key])
+  @@index([flowInstanceId, status])
+  @@index([ownerId, status])
+  @@map("flow_steps")
+}
+
+model FlowStepDependency {
+  id              String   @id @default(uuid()) @db.Uuid
+  stepId          String   @map("step_id") @db.Uuid
+  dependsOnStepId String   @map("depends_on_step_id") @db.Uuid
+  joinType        JoinType @default(AND) @map("join_type")
+
+  step          FlowStep @relation("StepDependent", fields: [stepId], references: [id])
+  dependsOnStep FlowStep @relation("StepDependsOn", fields: [dependsOnStepId], references: [id])
+
+  @@unique([stepId, dependsOnStepId])
+  @@map("flow_step_dependencies")
+}
+
+/// Immutable transition log — the flow engine's audit trail and the source
+/// for bottleneck analytics (blueprint §6/§52). Never updated, never deleted.
+model FlowStepRun {
+  id         String         @id @default(uuid()) @db.Uuid
+  stepId     String         @map("step_id") @db.Uuid
+  fromStatus FlowStepStatus @map("from_status")
+  toStatus   FlowStepStatus @map("to_status")
+  actorId    String?        @map("actor_id") @db.Uuid // null for system/SLA-timer transitions
+  at         DateTime       @default(now())
+
+  step FlowStep @relation(fields: [stepId], references: [id])
+
+  @@index([stepId])
+  @@map("flow_step_runs")
+}
+
+// =========================================================================
+// INVENTORY — ledger-based, never a raw editable quantity (blueprint §14)
+// =========================================================================
+
+model InventoryItem {
+  id                String    @id @default(uuid()) @db.Uuid
+  workspaceId       String    @map("workspace_id") @db.Uuid
+  sku               String
+  name              String
+  category          String
+  unit              String
+  sizeMl            Int?      @map("size_ml")
+  standardCost      Decimal   @map("standard_cost") @db.Decimal(12, 2)
+  preferredVendorId String?   @map("preferred_vendor_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  deletedAt         DateTime? @map("deleted_at")
+
+  workspace       Workspace              @relation(fields: [workspaceId], references: [id])
+  preferredVendor Vendor?                @relation(fields: [preferredVendorId], references: [id])
+  balances        InventoryBalance[]
+  movements       InventoryMovement[]
+  reservations    InventoryReservation[]
+  recipeItems     RecipeItem[]
+
+  @@unique([workspaceId, sku])
+  @@map("inventory_items")
+}
+
+model InventoryLocation {
+  id        String    @id @default(uuid()) @db.Uuid
+  cityId    String    @map("city_id") @db.Uuid
+  name      String
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  city      City                   @relation(fields: [cityId], references: [id])
+  balances  InventoryBalance[]
+  movementsFrom InventoryMovement[] @relation("MovementFromLocation")
+  movementsTo   InventoryMovement[] @relation("MovementToLocation")
+  reservations  InventoryReservation[]
+
+  @@unique([cityId, name])
+  @@map("inventory_locations")
+}
+
+/// Derived-only. Never written to directly — recomputed from
+/// inventory_movements (via trigger or transactional recompute), row-locked
+/// with SELECT ... FOR UPDATE during any movement. This is the fix for the
+/// prototype's `qty[cityIdx] -= n` in-place mutation (blueprint §14).
+model InventoryBalance {
+  id            String   @id @default(uuid()) @db.Uuid
+  skuId         String   @map("sku_id") @db.Uuid
+  locationId    String   @map("location_id") @db.Uuid
+  qtyOnHand     Int      @default(0) @map("qty_on_hand")
+  reorderLevel  Int      @default(0) @map("reorder_level")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  item     InventoryItem     @relation(fields: [skuId], references: [id])
+  location InventoryLocation @relation(fields: [locationId], references: [id])
+
+  @@unique([skuId, locationId])
+  @@map("inventory_balances")
+}
+
+model InventoryMovement {
+  id             String                @id @default(uuid()) @db.Uuid
+  skuId          String                @map("sku_id") @db.Uuid
+  type           InventoryMovementType
+  fromLocationId String?               @map("from_location_id") @db.Uuid
+  toLocationId   String?               @map("to_location_id") @db.Uuid
+  qty            Int
+  refType        String?               @map("ref_type") // e.g. "goods_receipt", "project", "adjustment"
+  refId          String?               @map("ref_id") @db.Uuid
+  actorId        String                @map("actor_id") @db.Uuid
+  note           String?
+  idempotencyKey String?               @unique @map("idempotency_key")
+  createdAt      DateTime              @default(now()) @map("created_at")
+
+  item         InventoryItem      @relation(fields: [skuId], references: [id])
+  fromLocation InventoryLocation? @relation("MovementFromLocation", fields: [fromLocationId], references: [id])
+  toLocation   InventoryLocation? @relation("MovementToLocation", fields: [toLocationId], references: [id])
+
+  @@index([skuId, createdAt])
+  @@map("inventory_movements")
+}
+
+model InventoryReservation {
+  id         String            @id @default(uuid()) @db.Uuid
+  skuId      String            @map("sku_id") @db.Uuid
+  locationId String            @map("location_id") @db.Uuid
+  projectId  String            @map("project_id") @db.Uuid
+  qty        Int
+  status     ReservationStatus @default(RESERVED)
+  createdAt  DateTime          @default(now()) @map("created_at")
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+
+  item     InventoryItem     @relation(fields: [skuId], references: [id])
+  location InventoryLocation @relation(fields: [locationId], references: [id])
+  project  Project           @relation(fields: [projectId], references: [id])
+
+  @@index([skuId, locationId, status])
+  @@map("inventory_reservations")
+}
+
+// =========================================================================
+// MENU COSTING
+// =========================================================================
+
+model Recipe {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  name        String
+  glass       String
+  garnishCost Decimal   @default(0) @map("garnish_cost") @db.Decimal(10, 2)
+  price       Decimal   @db.Decimal(10, 2)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id])
+  items     RecipeItem[]
+
+  @@map("recipes")
+}
+
+model RecipeItem {
+  id       String @id @default(uuid()) @db.Uuid
+  recipeId String @map("recipe_id") @db.Uuid
+  skuId    String @map("sku_id") @db.Uuid
+  qtyMl    Int    @map("qty_ml")
+
+  recipe Recipe        @relation(fields: [recipeId], references: [id])
+  item   InventoryItem @relation(fields: [skuId], references: [id])
+
+  @@map("recipe_items")
+}
+
+// =========================================================================
+// PROCUREMENT
+// =========================================================================
+
+model PurchaseRequest {
+  id        String                @id @default(uuid()) @db.Uuid
+  projectId String?               @map("project_id") @db.Uuid // nullable — store replenishment PRs aren't project-scoped
+  cityId    String?               @map("city_id") @db.Uuid
+  item      String
+  vendorId  String                @map("vendor_id") @db.Uuid
+  amount    Decimal               @db.Decimal(14, 2)
+  status    PurchaseRequestStatus @default(QUOTE_COMPARISON)
+  createdAt DateTime              @default(now()) @map("created_at")
+  updatedAt DateTime              @updatedAt @map("updated_at")
+  createdById String?             @map("created_by") @db.Uuid
+  deletedAt DateTime?             @map("deleted_at")
+
+  project        Project?        @relation(fields: [projectId], references: [id])
+  vendor         Vendor          @relation(fields: [vendorId], references: [id])
+  purchaseOrders PurchaseOrder[]
+
+  @@index([status])
+  @@map("purchase_requests")
+}
+
+model PurchaseOrder {
+  id            String              @id @default(uuid()) @db.Uuid
+  prId          String              @map("pr_id") @db.Uuid
+  vendorId      String              @map("vendor_id") @db.Uuid
+  total         Decimal             @db.Decimal(14, 2)
+  status        PurchaseOrderStatus @default(DRAFT)
+  idempotencyKey String?            @unique @map("idempotency_key")
+  createdAt     DateTime            @default(now()) @map("created_at")
+  updatedAt     DateTime            @updatedAt @map("updated_at")
+  createdById   String?             @map("created_by") @db.Uuid
+  deletedAt     DateTime?           @map("deleted_at")
+
+  purchaseRequest PurchaseRequest @relation(fields: [prId], references: [id])
+  vendor          Vendor          @relation(fields: [vendorId], references: [id])
+  goodsReceipts   GoodsReceipt[]
+
+  @@map("purchase_orders")
+}
+
+model GoodsReceipt {
+  id           String   @id @default(uuid()) @db.Uuid
+  poId         String   @map("po_id") @db.Uuid
+  receivedQty  Json     @map("received_qty") // partial-receipt aware: {skuId: qty, ...}
+  receivedAt   DateTime @default(now()) @map("received_at")
+  receivedById String   @map("received_by") @db.Uuid
+
+  purchaseOrder PurchaseOrder @relation(fields: [poId], references: [id])
+
+  @@map("goods_receipts")
+}
+
+// =========================================================================
+// FINANCE — BUDGETS / EXPENSES
+// =========================================================================
+
+model Budget {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String    @map("project_id") @db.Uuid
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  project Project      @relation(fields: [projectId], references: [id])
+  lines   BudgetLine[]
+
+  @@map("budgets")
+}
+
+model BudgetLine {
+  id            String  @id @default(uuid()) @db.Uuid
+  budgetId      String  @map("budget_id") @db.Uuid
+  category      String
+  plannedAmount Decimal @map("planned_amount") @db.Decimal(14, 2)
+
+  budget Budget @relation(fields: [budgetId], references: [id])
+
+  @@map("budget_lines")
+}
+
+model Expense {
+  id        String        @id @default(uuid()) @db.Uuid
+  userId    String        @map("user_id") @db.Uuid
+  projectId String        @map("project_id") @db.Uuid
+  category  String
+  amount    Decimal       @db.Decimal(12, 2)
+  status    ExpenseStatus @default(PENDING)
+  note      String?
+  incurredAt DateTime     @default(now()) @map("incurred_at")
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+  deletedAt DateTime?     @map("deleted_at")
+
+  user    User    @relation(fields: [userId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([userId, status])
+  @@map("expenses")
+}
+
+// =========================================================================
+// INVOICING — GST-correct, immutable once issued (blueprint §17)
+// =========================================================================
+
+/// One gap-free sequence counter per (city, financial year). Locked with
+/// SELECT ... FOR UPDATE when issuing an invoice, inside the same transaction
+/// that inserts the invoice row — this is what makes AMM/{CITY}/{FY}/{SEQ}
+/// sequential and never reused.
+model InvoiceCounter {
+  id            String @id @default(uuid()) @db.Uuid
+  workspaceId   String @map("workspace_id") @db.Uuid
+  cityId        String @map("city_id") @db.Uuid
+  financialYear String @map("financial_year") // e.g. "26-27"
+  lastSequence  Int    @default(0) @map("last_sequence")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  city      City      @relation(fields: [cityId], references: [id])
+
+  @@unique([cityId, financialYear])
+  @@map("invoice_counters")
+}
+
+model Invoice {
+  id             String        @id @default(uuid()) @db.Uuid
+  workspaceId    String        @map("workspace_id") @db.Uuid
+  invoiceNo      String        @unique @map("invoice_no") // AMM/{CITY_CODE}/{FY}/{SEQ}
+  clientId       String        @map("client_id") @db.Uuid
+  projectId      String        @map("project_id") @db.Uuid
+  cityId         String        @map("city_id") @db.Uuid
+  issueDate      DateTime?     @map("issue_date")
+  dueDate        DateTime      @map("due_date")
+  status         InvoiceStatus @default(DRAFT)
+  placeOfSupply  String        @map("place_of_supply") // GST state code of the client
+  taxableAmount  Decimal       @default(0) @map("taxable_amount") @db.Decimal(14, 2)
+  cgst           Decimal       @default(0) @db.Decimal(14, 2)
+  sgst           Decimal       @default(0) @db.Decimal(14, 2)
+  igst           Decimal       @default(0) @db.Decimal(14, 2)
+  total          Decimal       @default(0) @db.Decimal(14, 2)
+  idempotencyKey String?       @unique @map("idempotency_key")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  createdById    String?       @map("created_by") @db.Uuid
+  deletedAt      DateTime?     @map("deleted_at")
+
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id])
+  client      Client        @relation(fields: [clientId], references: [id])
+  project     Project       @relation(fields: [projectId], references: [id])
+  city        City          @relation(fields: [cityId], references: [id])
+  items       InvoiceItem[]
+  payments    Payment[]
+  creditNotes CreditNote[]
+  debitNotes  DebitNote[]
+
+  @@index([workspaceId, cityId, status])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String  @id @default(uuid()) @db.Uuid
+  invoiceId   String  @map("invoice_id") @db.Uuid
+  description String
+  qty         Decimal @default(1) @db.Decimal(10, 2)
+  rate        Decimal @db.Decimal(14, 2)
+  hsnSac      String? @map("hsn_sac")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@map("invoice_items")
+}
+
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  invoiceId      String        @map("invoice_id") @db.Uuid
+  amount         Decimal       @db.Decimal(14, 2)
+  method         PaymentMethod
+  receivedAt     DateTime      @default(now()) @map("received_at")
+  idempotencyKey String?       @unique @map("idempotency_key")
+  createdById    String?       @map("created_by") @db.Uuid
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+/// Corrections to an issued invoice never UPDATE the invoice row — they are
+/// always a new credit or debit note (blueprint §17/§22/§59).
+model CreditNote {
+  id        String   @id @default(uuid()) @db.Uuid
+  invoiceId String   @map("invoice_id") @db.Uuid
+  amount    Decimal  @db.Decimal(14, 2)
+  reason    String
+  createdAt DateTime @default(now()) @map("created_at")
+  createdById String? @map("created_by") @db.Uuid
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@map("credit_notes")
+}
+
+model DebitNote {
+  id        String   @id @default(uuid()) @db.Uuid
+  invoiceId String   @map("invoice_id") @db.Uuid
+  amount    Decimal  @db.Decimal(14, 2)
+  reason    String
+  createdAt DateTime @default(now()) @map("created_at")
+  createdById String? @map("created_by") @db.Uuid
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@map("debit_notes")
+}
+
+// =========================================================================
+// COMPLIANCE
+// =========================================================================
+
+model Licence {
+  id                    String        @id @default(uuid()) @db.Uuid
+  workspaceId           String        @map("workspace_id") @db.Uuid
+  projectId             String?       @map("project_id") @db.Uuid // null = company-wide (e.g. FSSAI)
+  type                  String
+  authority             String
+  cityId                String        @map("city_id") @db.Uuid
+  status                LicenceStatus @default(NOT_APPLIED)
+  refNo                 String?       @map("ref_no")
+  dueDate               DateTime      @map("due_date")
+  ownerId               String        @map("owner_id") @db.Uuid
+  escalationOffsetDays  Int           @default(7) @map("escalation_offset_days") // configurable, generalizes the prototype's hardcoded T-7
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+  deletedAt             DateTime?     @map("deleted_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  project   Project?  @relation(fields: [projectId], references: [id])
+  city      City      @relation(fields: [cityId], references: [id])
+  owner     User      @relation("LicenceOwner", fields: [ownerId], references: [id])
+
+  @@index([cityId, status])
+  @@map("licences")
+}
+
+// =========================================================================
+// RISKS / APPROVALS / DOCUMENTS
+// =========================================================================
+
+model Risk {
+  id        String       @id @default(uuid()) @db.Uuid
+  projectId String       @map("project_id") @db.Uuid
+  title     String
+  severity  RiskSeverity
+  ownerId   String       @map("owner_id") @db.Uuid
+  impact    String?
+  status    RiskStatus   @default(OPEN)
+  sourceIncidentId String? @map("source_incident_id") @db.Uuid // set when auto-raised from an event-day incident
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+  deletedAt DateTime?    @map("deleted_at")
+
+  project Project @relation(fields: [projectId], references: [id])
+  owner   User    @relation("RiskOwner", fields: [ownerId], references: [id])
+
+  @@index([projectId, status])
+  @@map("risks")
+}
+
+model Approval {
+  id            String         @id @default(uuid()) @db.Uuid
+  projectId     String         @map("project_id") @db.Uuid
+  title         String
+  type          ApprovalType
+  requesterId   String         @map("requester_id") @db.Uuid
+  approverRef   String         @map("approver_ref") // free-text external approver (client contact name) or user id for internal
+  status        ApprovalStatus @default(PENDING)
+  approvalLevel Int            @default(1) @map("approval_level")
+  decidedAt     DateTime?      @map("decided_at")
+  decisionReason String?       @map("decision_reason")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  deletedAt     DateTime?      @map("deleted_at")
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId, status])
+  @@map("approvals")
+}
+
+model Document {
+  id          String       @id @default(uuid()) @db.Uuid
+  workspaceId String       @map("workspace_id") @db.Uuid
+  projectId   String?      @map("project_id") @db.Uuid
+  name        String
+  type        DocumentType
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  createdById String?      @map("created_by") @db.Uuid
+  deletedAt   DateTime?    @map("deleted_at")
+
+  workspace Workspace         @relation(fields: [workspaceId], references: [id])
+  project   Project?          @relation(fields: [projectId], references: [id])
+  versions  DocumentVersion[]
+
+  @@index([projectId])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id          String   @id @default(uuid()) @db.Uuid
+  documentId  String   @map("document_id") @db.Uuid
+  versionNo   Int      @map("version_no")
+  storageKey  String   @map("storage_key")
+  uploadedById String  @map("uploaded_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id])
+
+  @@unique([documentId, versionNo])
+  @@map("document_versions")
+}
+
+// =========================================================================
+// CHAT
+// =========================================================================
+
+model Channel {
+  id          String      @id @default(uuid()) @db.Uuid
+  workspaceId String      @map("workspace_id") @db.Uuid
+  name        String
+  kind        ChannelKind
+  cityId      String?     @map("city_id") @db.Uuid
+  projectId   String?     @map("project_id") @db.Uuid
+  description String?
+  createdAt   DateTime    @default(now()) @map("created_at")
+  deletedAt   DateTime?   @map("deleted_at")
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id])
+  city      City?           @relation(fields: [cityId], references: [id])
+  project   Project?        @relation(fields: [projectId], references: [id])
+  messages  Message[]
+  members   ChannelMember[]
+
+  @@map("channels")
+}
+
+model ChannelMember {
+  channelId String   @map("channel_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  joinedAt  DateTime @default(now()) @map("joined_at")
+  lastReadAt DateTime? @map("last_read_at")
+
+  channel Channel @relation(fields: [channelId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@id([channelId, userId])
+  @@map("channel_members")
+}
+
+model Message {
+  id        String    @id @default(uuid()) @db.Uuid
+  channelId String    @map("channel_id") @db.Uuid
+  authorId  String?   @map("author_id") @db.Uuid // null for "Podium Bot" system messages
+  body      String
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  channel Channel @relation(fields: [channelId], references: [id])
+  author  User?   @relation(fields: [authorId], references: [id])
+
+  @@index([channelId, createdAt])
+  @@map("messages")
+}
+
+// =========================================================================
+// MAIL (Gmail integration — stub-capable, see docs/integration-setup.md)
+// =========================================================================
+
+model Email {
+  id               String    @id @default(uuid()) @db.Uuid
+  workspaceId      String    @map("workspace_id") @db.Uuid
+  gmailMessageId   String    @unique @map("gmail_message_id")
+  threadId         String    @map("thread_id")
+  fromAddress      String    @map("from_address")
+  subject          String
+  snippet          String?
+  receivedAt       DateTime  @map("received_at")
+  isUnread         Boolean   @default(true) @map("is_unread")
+  isStarred        Boolean   @default(false) @map("is_starred")
+  linkedClientId   String?   @map("linked_client_id") @db.Uuid
+  linkedProjectId  String?   @map("linked_project_id") @db.Uuid
+  linkedVendorId   String?   @map("linked_vendor_id") @db.Uuid
+  linkedLeadId     String?   @map("linked_lead_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  project Project? @relation(fields: [linkedProjectId], references: [id])
+
+  @@index([workspaceId, isUnread])
+  @@map("emails")
+}
+
+// =========================================================================
+// CALENDAR / MEET
+// =========================================================================
+
+model Meeting {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String?   @map("project_id") @db.Uuid
+  title     String
+  startsAt  DateTime  @map("starts_at")
+  durationMinutes Int @default(30) @map("duration_minutes")
+  meetLink  String?   @map("meet_link")
+  notes     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  project      Project?       @relation(fields: [projectId], references: [id])
+  actionItems  MeetingActionItem[]
+
+  @@map("meetings")
+}
+
+model MeetingActionItem {
+  id          String    @id @default(uuid()) @db.Uuid
+  meetingId   String    @map("meeting_id") @db.Uuid
+  text        String
+  ownerId     String    @map("owner_id") @db.Uuid
+  promotedTaskId String? @map("promoted_task_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  meeting Meeting @relation(fields: [meetingId], references: [id])
+
+  @@map("meeting_action_items")
+}
+
+// =========================================================================
+// EVENT DAY
+// =========================================================================
+
+model Runsheet {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String    @map("project_id") @db.Uuid
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  project Project        @relation(fields: [projectId], references: [id])
+  items   RunsheetItem[]
+
+  @@map("runsheets")
+}
+
+model RunsheetItem {
+  id            String    @id @default(uuid()) @db.Uuid
+  runsheetId    String    @map("runsheet_id") @db.Uuid
+  scheduledTime String    @map("scheduled_time") // HH:MM cue time, event-day-local
+  text          String
+  ownerId       String    @map("owner_id") @db.Uuid
+  doneAt        DateTime? @map("done_at")
+  sortOrder     Int       @default(0) @map("sort_order")
+
+  runsheet Runsheet @relation(fields: [runsheetId], references: [id])
+
+  @@map("runsheet_items")
+}
+
+model EventDayCheckin {
+  id          String   @id @default(uuid()) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  checkedInAt DateTime @default(now()) @map("checked_in_at")
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, userId])
+  @@map("event_day_checkins")
+}
+
+model EventDayIncident {
+  id         String           @id @default(uuid()) @db.Uuid
+  projectId  String           @map("project_id") @db.Uuid
+  severity   IncidentSeverity
+  text       String
+  reportedById String         @map("reported_by") @db.Uuid
+  raisedRiskId String?        @map("raised_risk_id") @db.Uuid // set when severity High/Critical auto-raises a risk
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@map("event_day_incidents")
+}
+
+// =========================================================================
+// PEOPLE (operationally scoped — not a full HRMS, blueprint §22)
+// =========================================================================
+
+model Attendance {
+  userId    String           @id @map("user_id") @db.Uuid
+  status    AttendanceStatus @default(PRESENT)
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("attendance")
+}
+
+model Leave {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  fromDate  DateTime    @map("from_date")
+  toDate    DateTime    @map("to_date")
+  type      LeaveType
+  status    LeaveStatus @default(PENDING)
+  note      String?
+  decidedById String?   @map("decided_by") @db.Uuid
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@map("leaves")
+}
+
+model Freelancer {
+  id             String    @id @default(uuid()) @db.Uuid
+  workspaceId    String    @map("workspace_id") @db.Uuid
+  name           String
+  cityId         String    @map("city_id") @db.Uuid
+  certExpiresAt  DateTime  @map("cert_expires_at") // IBG/BCII bartender certification expiry
+  dayRate        Decimal   @map("day_rate") @db.Decimal(10, 2)
+  eventsCount    Int       @default(0) @map("events_count")
+  rating         Decimal?  @db.Decimal(2, 1)
+  isAvailable    Boolean   @default(true) @map("is_available")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  city      City      @relation(fields: [cityId], references: [id])
+
+  @@map("freelancers")
+}
+
+// =========================================================================
+// KNOWLEDGE / SOPS
+// =========================================================================
+
+model Sop {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  title       String
+  department  String
+  ownerId     String?   @map("owner_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id])
+  versions  SopVersion[]
+
+  @@map("sops")
+}
+
+model SopVersion {
+  id          String   @id @default(uuid()) @db.Uuid
+  sopId       String   @map("sop_id") @db.Uuid
+  versionNo   Int      @map("version_no")
+  body        String
+  stepsCount  Int      @default(0) @map("steps_count")
+  createdAt   DateTime @default(now()) @map("created_at")
+  createdById String?  @map("created_by") @db.Uuid
+
+  sop Sop @relation(fields: [sopId], references: [id])
+
+  @@unique([sopId, versionNo])
+  @@map("sop_versions")
+}
+
+// =========================================================================
+// AUTOMATION ENGINE (blueprint §12)
+// =========================================================================
+
+model AutomationRule {
+  id             String   @id @default(uuid()) @db.Uuid
+  workspaceId    String   @map("workspace_id") @db.Uuid
+  name           String
+  triggerType    String   @map("trigger_type") // event | schedule | threshold | time_relative
+  triggerConfig  Json     @map("trigger_config")
+  actions        Json // [{type, config}, ...]
+  isEnabled      Boolean  @default(true) @map("is_enabled")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id])
+  runs      AutomationRun[]
+
+  @@map("automation_rules")
+}
+
+model AutomationRun {
+  id            String              @id @default(uuid()) @db.Uuid
+  ruleId        String              @map("rule_id") @db.Uuid
+  triggeredBy   String              @map("triggered_by") // entity id or "schedule"
+  triggerHash   String              @map("trigger_hash") // (ruleId, entityId, triggerHash) idempotency
+  status        AutomationRunStatus @default(PENDING)
+  attempt       Int                 @default(1)
+  error         String?
+  startedAt     DateTime            @default(now()) @map("started_at")
+  finishedAt    DateTime?           @map("finished_at")
+
+  rule AutomationRule @relation(fields: [ruleId], references: [id])
+
+  @@unique([ruleId, triggeredBy, triggerHash])
+  @@map("automation_runs")
+}
+
+// =========================================================================
+// NOTIFICATIONS / AUDIT
+// =========================================================================
+
+model Notification {
+  id         String    @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  icon       String?
+  text       String
+  readAt     DateTime? @map("read_at")
+  sourceType String?   @map("source_type")
+  sourceId   String?   @map("source_id") @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+/// Universal, append-only audit trail. Never updated, never deleted — written
+/// exclusively by the shared audit interceptor (blueprint §7/§30), not by
+/// individual endpoint handlers.
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  workspaceId String  @map("workspace_id") @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String // e.g. "invoice.issue", "flow_step.complete"
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id") @db.Uuid
+  before     Json?
+  after      Json?
+  ip         String?
+  at         DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  actor     User?     @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([workspaceId, at])
+  @@map("audit_logs")
+}
+
+/// Backs idempotency-key support on financial/inventory mutation endpoints
+/// (blueprint §7/§32). Short-lived; a cleanup job may prune rows older than
+/// its retention window once introduced.
+model IdempotencyKey {
+  key         String   @id
+  endpoint    String
+  requestHash String   @map("request_hash")
+  responseBody Json?   @map("response_body")
+  statusCode  Int?     @map("status_code")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("idempotency_keys")
+}
