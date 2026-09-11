@@ -30,9 +30,21 @@ export class CityScopeService {
     return { cityId: { in: allowed } };
   }
 
-  assertCanAccessCity(user: RequestUser, cityId: string): void {
+  /**
+   * `cityId` is nullable because real imported records (clients, leads,
+   * vendors, freelancers) often carry no city — see Client.cityId in the
+   * schema. An unassigned record is treated as reachable only by an ALL-scope
+   * caller, which is deliberately the *stricter* reading: it hides rows from
+   * city-scoped users rather than exposing them to everyone. This mirrors
+   * scopeFilter() exactly, where a `cityId IN (...)` predicate already
+   * excludes NULL, so list and detail views can never disagree.
+   */
+  assertCanAccessCity(user: RequestUser, cityId: string | null): void {
     const allowed = allowedCityIds(user);
     if (allowed === "ALL") return;
+    if (cityId === null) {
+      throw new ForbiddenException("This record has no city assigned; only all-cities users can open it.");
+    }
     if (!allowed.includes(cityId)) {
       throw new ForbiddenException("You do not have access to this city.");
     }

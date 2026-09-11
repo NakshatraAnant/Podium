@@ -31,5 +31,15 @@ export const convertLeadSchema = z.object({
   eventDate: z.coerce.date(),
   pmId: z.string().uuid(),
   playbookId: z.string().uuid().optional(),
+  /**
+   * Required only when the lead itself has no city — true for most rows
+   * imported from the real spreadsheets, whose `Location` was free text that
+   * didn't unambiguously match one of the six Podium cities. A project must
+   * have a city (it drives GST treatment and scoping), so the human doing the
+   * conversion supplies it rather than the importer having guessed one.
+   */
+  cityId: z.string().uuid().optional(),
+  /** Same story for deal value: cold/imported leads carry no estimate. */
+  value: z.number().nonnegative().optional(),
 });
 export type ConvertLeadInput = z.infer<typeof convertLeadSchema>;

@@ -4,6 +4,17 @@ import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
 
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 500;
+
+export interface ListClientsOptions {
+  cityId?: string;
+  segment?: "EVENT_CLIENT" | "RETAIL_CUSTOMER";
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
 @Injectable()
 export class ClientsService {
   constructor(
@@ -11,13 +22,33 @@ export class ClientsService {
     private readonly cityScope: CityScopeService,
   ) {}
 
-  list(user: RequestUser, cityId?: string) {
-    const scope = this.cityScope.scopeFilter(user, cityId);
-    return this.prisma.client.client.findMany({
-      where: { workspaceId: user.workspaceId, deletedAt: null, ...scope },
-      include: { city: true, contacts: true },
-      orderBy: { name: "asc" },
-    });
+  /**
+   * Defaults to the EVENT_CLIENT segment. The Cocktail Shop retail dump is
+   * ~100x larger than the real B2B client list, so an unfiltered list would
+   * bury it — the caller must ask for RETAIL_CUSTOMER explicitly. Results are
+   * paged because either segment is far too large to ship whole.
+   */
+  async list(user: RequestUser, opts: ListClientsOptions = {}) {
+    const scope = this.cityScope.scopeFilter(user, opts.cityId);
+    const take = Math.min(opts.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    const where = {
+      workspaceId: user.workspaceId,
+      deletedAt: null,
+      segment: opts.segment ?? ("EVENT_CLIENT" as const),
+      ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
+      ...scope,
+    };
+    const [total, rows] = await this.prisma.client.$transaction([
+      this.prisma.client.client.count({ where }),
+      this.prisma.client.client.findMany({
+        where,
+        include: { city: true, contacts: true },
+        orderBy: { name: "asc" },
+        take,
+        skip: opts.offset ?? 0,
+      }),
+    ]);
+    return { total, limit: take, offset: opts.offset ?? 0, rows };
   }
 
   async get(user: RequestUser, id: string) {

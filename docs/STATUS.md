@@ -1,12 +1,190 @@
 # Podium v2 — Build Status
 
-*Last updated: after a second-session production-readiness audit (2026-09-11)
-that re-verified everything below by actually running it — real requests,
-real database queries, real test runs — rather than trusting the prior
-session's own claims. This file is the authoritative "what's actually true"
-document — read it before assuming any phase, screen, or endpoint is
-production-ready. `docs/screens.md` is the functional spec; this file is the
-honest progress report against it.*
+*Last updated: after the real-data import (2026-09-11) that replaced the
+development seed fixture with AMM Brands' actual client, vendor, staffing
+and pipeline records — see §0.0 below. The production-readiness audit that
+precedes it (§0.1) re-verified everything by actually running it: real
+requests, real database queries, real test runs. This file is the
+authoritative "what's actually true" document — read it before assuming any
+phase, screen, or endpoint is production-ready. `docs/screens.md` is the
+functional spec; this file is the honest progress report against it.*
+
+## 0.0 Real-data import — 2026-09-11
+
+`scripts/import-real-data.ts` (run with `pnpm import:real-data`) replaces
+the synthetic seed records in `clients`, `vendors`, `freelancers` and
+`leads` with AMM Brands' real data from two workbooks. **This is not the dev
+seed.** `pnpm --filter @podium/db seed` still builds the demo fixture that
+CI and the e2e suite run against; the import is a separate, destructive
+production load. Run the import only against a database intended to hold
+production data, and re-run the seed before running the test suite locally.
+
+### Verified counts (live `SELECT COUNT(*)`, after import)
+
+| Table / segment | Rows |
+| --- | --- |
+| `clients` — `EVENT_CLIENT` | 568 |
+| `clients` — `RETAIL_CUSTOMER` (Cocktail Shop) | 51,456 |
+| `vendors` | 163 |
+| `freelancers` | 171 |
+| `leads` — `PIPELINE` (live sales pipeline) | 369 |
+| `leads` — `COLD_PROSPECT` (47 prospecting sheets) | 12,381 |
+| leads linked to a client by the §9 cross-reference | 415 |
+
+Zero rows in any of the four tables lack an import `source`/`source_file`,
+i.e. **no synthetic record survives**. Every one of the 65,108 imported rows
+was traced back to a row in the source workbook carrying the same values
+(name + phone + address for clients, company + contact + email + address for
+vendors, name + phone + category for freelancers, customer id + email for
+retail, name or raw phone for leads) — an exhaustive check, not a sample.
+
+### Security
+
+`AMM_BRANDS_LLP_DATABASE.xlsx` contains a sheet of plaintext credentials.
+It was never opened, read, parsed, or logged. `assertNotForbidden()` in the
+import script **throws** rather than skipping if any sheet whose name
+mentions passwords is reached, so a later refactor cannot start reading it
+quietly.
+
+### Data-quality findings in the source workbooks
+
+These are real problems in AMM's spreadsheets, found by reading the data
+rather than trusting the headers. They are handled in the importer and
+listed here so they are not rediscovered later:
+
+1. **`AMM CLIENT DATABASE` is several lists stacked in one sheet.** Nine
+   rows repeat the header with a section label in the name column
+   ("BUSINESS CLIENTS NAME", "PERSON NAME (Rotary Friends)", "CORPORATE
+   COMPANY NAMES", ...). They are separators, not clients. They are skipped,
+   and the label is used to set `Client.type` and recorded in `source` —
+   better evidence than guessing company-vs-person from the name string.
+2. **156 rows of that sheet are the supplier list pasted in**, with the
+   e-mail sitting in the PHONE column. All 156 e-mails match the `Clients`
+   sheet that §4 imports as vendors. Importing them would have filed AMM's
+   suppliers as its customers; they are skipped, and the `Clients` sheet is
+   treated as the authoritative copy.
+3. **Three columns the import brief expects to drive CRM stage are
+   effectively unused in the real data.** `Is he a Current client ( Y / N)`
+   is blank in ~95% of rows and, where filled, holds menu and run-of-event
+   notes rather than Y/N; `Package Proposed` is blank in 231 of 232 rows and
+   `Advance` in all 232. Consequence: **no pipeline lead carries a deal
+   value, and none is marked Won from that column.** A bare Y/N is still
+   honoured where present; anything longer is preserved as requirement notes
+   on `remarks` (31 leads) instead of being discarded. The 415 Won links all
+   come from the §9 phone cross-reference instead.
+4. **`ARCHIT PHONE DATABASE` is a personal copy of the client list.** It is
+   the source of all 415 duplicates the cross-reference collapsed — each is
+   now one client with its lead marked Won and linked, not two records.
+5. **`Customer ID` in `DATA DUMP` is not unique** (3,375 IDs repeat; they
+   are business names, not keys), and the sheet names two columns `phone`.
+   The two phone columns are alternate numbers for one customer, not
+   duplicates: only the first usable one is the dedupe key, but both raw
+   values are kept.
+6. **International numbers normalize lossily.** §2's rule (keep the last 10
+   digits) is applied mechanically, so e.g. an Italian `(39) 340 188547`
+   becomes `9340188547`. The original is always preserved in `phone_raw`,
+   and 15 leads with no name at all are named by their normalized phone.
+
+### Why the counts differ from the brief's estimates
+
+The brief's expected figures count **only rows that have a usable phone**.
+This import also keeps rows that have a name but no phone (which §7
+explicitly requires), so every total is legitimately higher. Reconciled:
+
+| | brief expected | phone-dedupable rows here | total imported |
+| --- | --- | --- | --- |
+| §3 clients | ~476 | 471 distinct phones | 568 |
+| §6 pipeline (sheets 1–4) | ~144 | 143 distinct phones | — |
+| §7 cold prospects | 8,000–9,000 | ~8,350 distinct phones | 12,381 |
+| §8 retail | ~45,000 | 44,462 distinct phones | 51,456 |
+
+Every phone-dedupable figure lands within a few rows of the brief. The gap
+is entirely rows that cannot participate in phone dedupe: 1,606 cold rows
+come from three sheets with no phone column at all (`jaipur hotels`,
+`hotel and wedding resorts`, `ANM DELIVERY LIST`), and ~7,000 retail rows
+are keyed on e-mail because they have no phone.
+
+### Sheets deliberately NOT auto-imported — needs manual review
+
+These 12 sheets have no usable header row in the normal position, or are not
+lead data at all. They are **skipped, not forgotten**:
+
+`EVENT PLANNERS DATABASE`, `Trade Fair`, `HOTELS`, `WOW AWARDS`,
+`FARM HOUSE DATABASE`, `BRANDS PROFILES LISTING DATA`,
+`DUBAI WEDDING PLANNER`, `IHM COLLEGES NORTH`,
+`ANM CORORATES COMPANY CONTACT`, `ANM BOOK LIST`, `ANM BOOK BAR &REST`,
+`2nd Edition International Barte[nder competition]`.
+
+Separately, **`EVENT COSTING FOR DEHRADUN`** is real menu/event costing data,
+not leads. Its header sits on row 2 and reads `S.No. | Category | Item
+Description | Quantity | Unit Cost (INR) | Total Cost (INR) | Notes` — which
+maps to the Menu Costing module in a future phase: `Category`+`Item
+Description` → `recipes.name`/`recipe_items`, `Quantity` →
+`recipe_items.qty`, `Unit Cost (INR)` → `recipe_items.unit_cost`, with
+`Total Cost (INR)` derived, never stored (per the "never compute totals
+client-side / never store a derivable total" rule).
+
+### Schema changes this required
+
+Migration `20260911120000_real_data_import_fields`. `cityId` is now nullable
+on `clients`, `vendors`, `freelancers` and `leads`, because most real records
+carry no city and guessing one would drive GST treatment and city scoping
+from a fabricated value. **An unassigned record is visible only to ALL-scope
+users** — a `cityId IN (...)` predicate excludes NULL, and
+`assertCanAccessCity()` was widened to match exactly, so list and detail
+views can never disagree. Also nullable for the same "unknown must stay
+unknown" reason: `leads.value`/`ownerId`, `vendors.category`,
+`freelancers.certExpiresAt` and `dayRate` (a fabricated certification expiry
+would drive real event-day compliance decisions).
+
+Added: `client_segment` and `LeadKind` enums; `phone`/`phone_raw`/`email`/
+`address`/`source` across the four tables; lead provenance
+(`source_sheet`, `source_file`) and detail (`location_text`, `event_type`,
+`pax`, `event_date`, `remarks`, `intake_detail` JSON). Unique
+`(workspace_id, phone)` on `clients`, `leads` and `freelancers` enforces the
+dedupe at the database, not just in the script.
+
+`GET /clients` and `GET /leads` are now **paged and segmented**: clients
+default to `EVENT_CLIENT` and leads to `PIPELINE`, so the 51k retail dump
+and 12k cold list can never bury the real B2B client list or the live
+pipeline. Both accept `limit`/`offset`/`search` and return
+`{ total, limit, offset, rows }`.
+
+### Consequence of the full purge
+
+Per an explicit decision recorded during this import, the demo clients and
+vendors were removed along with everything that depended on them — **11
+projects, 10 invoices, 26 project-vendor links, 5 purchase requests, 14
+tasks and 1 flow instance**. The alternative was keeping synthetic clients,
+which the brief forbade. Configuration and the inventory ledger were
+deliberately left intact: cities, users, roles/permissions, inventory items,
+locations, balances and movements, flow templates, playbooks, SOPs and
+automation rules. `audit_logs` is never deleted — the import itself writes a
+`data.real_import` row carrying the full per-section report.
+
+**This means the live database has no projects, invoices, tasks or flow
+instances.** Those features are built and tested but currently have no real
+data to display, because AMM's workbooks contain none. The e2e suite is
+unaffected: CI seeds the demo fixture before running tests.
+
+### Test suite after the import
+
+**28/28 passing** (up from 23) against a freshly seeded database, verified by
+running it. Five new tests in `apps/api/test/city-scope-nullable.e2e-spec.ts`
+cover the access-control case the nullable `cityId` introduced: an
+unassigned-city row must be hidden from a city-scoped user in the list *and*
+403 them on direct fetch (list and detail must never disagree), visible to an
+ALL-scope user in both, with the clients list proven to page and to default
+to `EVENT_CLIENT`.
+
+One pre-existing fragility was confirmed while running these, unrelated to
+the import: **`inventory.e2e-spec.ts` is not idempotent.** Its concurrency
+test consumes the seeded Goa stock of `SP-CAM` and asserts that stock is
+greater than zero, so it passes on a freshly seeded database and fails on a
+second consecutive run. CI seeds before testing so it is green there, but
+running `pnpm --filter @podium/api test` twice locally without re-seeding
+will fail on that one test. It should create its own stock rather than
+depending on the fixture's.
 
 ## 0.1 Audit — 2026-09-11: what was checked, what was found, what was fixed
 

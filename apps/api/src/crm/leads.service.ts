@@ -4,6 +4,19 @@ import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
 
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 500;
+
+export interface ListLeadsOptions {
+  cityId?: string;
+  kind?: "PIPELINE" | "COLD_PROSPECT";
+  stage?: "LEAD" | "QUALIFIED" | "PROPOSAL" | "NEGOTIATION" | "WON" | "LOST";
+  sourceSheet?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
 @Injectable()
 export class LeadsService {
   constructor(
@@ -11,12 +24,33 @@ export class LeadsService {
     private readonly cityScope: CityScopeService,
   ) {}
 
-  list(user: RequestUser, cityId?: string) {
-    const scope = this.cityScope.scopeFilter(user, cityId);
-    return this.prisma.client.lead.findMany({
-      where: { workspaceId: user.workspaceId, deletedAt: null, ...scope },
-      orderBy: { createdAt: "desc" },
-    });
+  /**
+   * Defaults to the PIPELINE kind — the CRM board is about the ~200 real,
+   * human-worked opportunities, not the thousands of cold prospecting rows.
+   * Cold lists are reachable with `kind=COLD_PROSPECT`, paged.
+   */
+  async list(user: RequestUser, opts: ListLeadsOptions = {}) {
+    const scope = this.cityScope.scopeFilter(user, opts.cityId);
+    const take = Math.min(opts.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    const where = {
+      workspaceId: user.workspaceId,
+      deletedAt: null,
+      kind: opts.kind ?? ("PIPELINE" as const),
+      ...(opts.stage ? { stage: opts.stage } : {}),
+      ...(opts.sourceSheet ? { sourceSheet: opts.sourceSheet } : {}),
+      ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
+      ...scope,
+    };
+    const [total, rows] = await this.prisma.client.$transaction([
+      this.prisma.client.lead.count({ where }),
+      this.prisma.client.lead.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take,
+        skip: opts.offset ?? 0,
+      }),
+    ]);
+    return { total, limit: take, offset: opts.offset ?? 0, rows };
   }
 
   async create(user: RequestUser, input: CreateLeadInput) {
@@ -53,6 +87,19 @@ export class LeadsService {
       throw new BadRequestException("Provide clientId (existing) or clientName (to create one).");
     }
 
+    // Imported leads often have no city and no value (the source sheets had
+    // free-text locations and no quoted amount). A project needs both, so the
+    // converting user supplies what's missing rather than the system guessing.
+    const cityId = lead.cityId ?? input.cityId ?? null;
+    if (!cityId) {
+      throw new BadRequestException("This lead has no city assigned — pass cityId to say which city the project belongs to.");
+    }
+    this.cityScope.assertCanAccessCity(user, cityId);
+    const value = lead.value ?? (input.value !== undefined ? input.value : null);
+    if (value === null) {
+      throw new BadRequestException("This lead has no estimated value — pass value to set the project's revenue.");
+    }
+
     return this.prisma.client.$transaction(async (tx) => {
       const client = input.clientId
         ? await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
@@ -61,8 +108,8 @@ export class LeadsService {
               workspaceId: user.workspaceId,
               name: input.clientName!,
               type: input.clientType ?? "INDIVIDUAL",
-              cityId: lead.cityId,
-              ltv: lead.value,
+              cityId,
+              ltv: value,
               since: new Date(),
               createdById: user.id,
               updatedById: user.id,
@@ -76,11 +123,11 @@ export class LeadsService {
           clientId: client.id,
           playbookId: input.playbookId,
           type: input.projectType,
-          cityId: lead.cityId,
+          cityId,
           eventDate: input.eventDate,
           pmId: input.pmId,
           status: "PLANNING",
-          revenue: lead.value,
+          revenue: value,
           createdById: user.id,
           updatedById: user.id,
         },

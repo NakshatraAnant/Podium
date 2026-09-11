@@ -13,8 +13,21 @@ export class ClientsController {
 
   @Get()
   @RequirePermissions("clients:view")
-  list(@CurrentUser() user: RequestUser, @Query("cityId") cityId?: string) {
-    return this.clients.list(user, cityId);
+  list(
+    @CurrentUser() user: RequestUser,
+    @Query("cityId") cityId?: string,
+    @Query("segment") segment?: string,
+    @Query("search") search?: string,
+    @Query("limit") limit?: string,
+    @Query("offset") offset?: string,
+  ) {
+    return this.clients.list(user, {
+      cityId,
+      segment: segment === "RETAIL_CUSTOMER" ? "RETAIL_CUSTOMER" : segment === "EVENT_CLIENT" ? "EVENT_CLIENT" : undefined,
+      search,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
   }
 
   @Get(":id")

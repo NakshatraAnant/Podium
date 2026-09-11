@@ -7,14 +7,33 @@ import { ZodValidationPipe } from "../common/pipes/zod-validation.pipe";
 import type { RequestUser } from "../common/types";
 import { LeadsService } from "./leads.service";
 
+const LEAD_STAGES = ["LEAD", "QUALIFIED", "PROPOSAL", "NEGOTIATION", "WON", "LOST"] as const;
+
 @Controller("leads")
 export class LeadsController {
   constructor(private readonly leads: LeadsService) {}
 
   @Get()
   @RequirePermissions("leads:view")
-  list(@CurrentUser() user: RequestUser, @Query("cityId") cityId?: string) {
-    return this.leads.list(user, cityId);
+  list(
+    @CurrentUser() user: RequestUser,
+    @Query("cityId") cityId?: string,
+    @Query("kind") kind?: string,
+    @Query("stage") stage?: string,
+    @Query("sourceSheet") sourceSheet?: string,
+    @Query("search") search?: string,
+    @Query("limit") limit?: string,
+    @Query("offset") offset?: string,
+  ) {
+    return this.leads.list(user, {
+      cityId,
+      kind: kind === "COLD_PROSPECT" ? "COLD_PROSPECT" : kind === "PIPELINE" ? "PIPELINE" : undefined,
+      stage: LEAD_STAGES.find((s) => s === stage),
+      sourceSheet,
+      search,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
   }
 
   @Post()

@@ -36,6 +36,25 @@ enum ClientType {
   BRAND
 }
 
+// Keeps the ~55k-row Cocktail Shop e-commerce dump from burying the real,
+// name-rich B2B event client list on the Clients screen. Every query that
+// powers the main Clients view filters on EVENT_CLIENT; retail customers are
+// reachable only by explicitly asking for that segment.
+enum ClientSegment {
+  EVENT_CLIENT
+  RETAIL_CUSTOMER
+}
+
+// Separates the live, human-worked sales pipeline (Elixir query sheets) from
+// the bulk cold-prospecting lists. Both live in `leads` because they share a
+// lifecycle — a cold prospect that answers becomes a pipeline lead — but the
+// CRM board must never default to showing ~9k cold rows alongside ~200 real
+// opportunities.
+enum LeadKind {
+  PIPELINE
+  COLD_PROSPECT
+}
+
 enum LeadStage {
   LEAD
   QUALIFIED
@@ -496,7 +515,23 @@ model Client {
   workspaceId String     @map("workspace_id") @db.Uuid
   name        String
   type        ClientType
-  cityId      String     @map("city_id") @db.Uuid
+  /// Nullable since the real AMM client list carries no city for most rows.
+  /// Guessing one would be worse than leaving it blank: city drives invoice
+  /// GST treatment and the city-scope predicate. An unassigned client is
+  /// visible only to ALL-scope users (a `cityId IN (...)` filter excludes
+  /// NULL), which is the safe default — it under-shares rather than leaks.
+  cityId      String?    @map("city_id") @db.Uuid
+  /// Canonical 10-digit form (see §2 normalization) — the dedupe key.
+  phone       String?
+  /// Original string as it appeared in the source, country code intact.
+  phoneRaw    String?    @map("phone_raw")
+  email       String?
+  address     String?
+  /// Provenance, e.g. "AMM Client Database import".
+  source      String?
+  segment     ClientSegment @default(EVENT_CLIENT) @map("client_segment")
+  /// `Customer ID` from the Cocktail Shop DATA DUMP, where one exists.
+  externalRef String?    @map("external_ref")
   gstin       String?
   gstStateCode String?   @map("gst_state_code")
   ltv         Decimal    @default(0) @db.Decimal(14, 2)
@@ -508,13 +543,17 @@ model Client {
   deletedAt   DateTime?  @map("deleted_at")
 
   workspace Workspace       @relation(fields: [workspaceId], references: [id])
-  city      City            @relation(fields: [cityId], references: [id])
+  city      City?           @relation(fields: [cityId], references: [id])
   contacts  ClientContact[]
   projects  Project[]
   leads     Lead[]
   invoices  Invoice[]
 
+  // One human = one client row. Postgres treats NULLs as distinct, so the
+  // many phone-less rows coexist while real numbers can never duplicate.
+  @@unique([workspaceId, phone])
   @@index([workspaceId, cityId])
+  @@index([workspaceId, segment])
   @@map("clients")
 }
 
@@ -538,11 +577,42 @@ model ClientContact {
 model Lead {
   id          String    @id @default(uuid()) @db.Uuid
   workspaceId String    @map("workspace_id") @db.Uuid
+  /// Company/organisation where the sheet gives one, else the person's name.
   name        String
   stage       LeadStage @default(LEAD)
-  value       Decimal   @db.Decimal(14, 2)
-  ownerId     String    @map("owner_id") @db.Uuid
-  cityId      String    @map("city_id") @db.Uuid
+  kind        LeadKind  @default(PIPELINE)
+  /// Nullable: a cold prospect scraped from a bar directory has no deal value
+  /// yet, and defaulting it to 0 would quietly understate nothing while making
+  /// "never estimated" indistinguishable from "estimated at zero". Pipeline
+  /// forecasting must treat NULL as unestimated, not as 0.
+  value       Decimal?  @db.Decimal(14, 2)
+  /// Nullable: imported leads are unowned until a human picks them up.
+  ownerId     String?   @map("owner_id") @db.Uuid
+  /// Nullable for the same reason as Client.cityId — see that comment.
+  cityId      String?   @map("city_id") @db.Uuid
+
+  contactName String?   @map("contact_name")
+  phone       String?
+  phoneRaw    String?   @map("phone_raw")
+  email       String?
+  company     String?
+  designation String?
+  address     String?
+  website     String?
+  /// Lead source: `Planner Ref` for pipeline rows, sheet-derived otherwise.
+  source      String?
+  /// Exact source sheet, so a bad import batch can be traced or undone.
+  sourceSheet String?   @map("source_sheet")
+  sourceFile  String?   @map("source_file")
+  /// Free-text location as written; only mapped to cityId on exact matches.
+  locationText String?  @map("location_text")
+  eventType   String?   @map("event_type")
+  pax         Int?
+  eventDate   DateTime? @map("event_date")
+  remarks     String?
+  /// Richer intake-form answers (bar size, services, prop display, ...).
+  intakeDetail Json?    @map("intake_detail")
+
   convertedClientId String? @map("converted_client_id") @db.Uuid
   convertedProjectId String? @map("converted_project_id") @db.Uuid
   createdAt   DateTime  @default(now()) @map("created_at")
@@ -552,11 +622,14 @@ model Lead {
   deletedAt   DateTime? @map("deleted_at")
 
   workspace         Workspace @relation(fields: [workspaceId], references: [id])
-  owner             User      @relation("LeadOwner", fields: [ownerId], references: [id])
-  city              City      @relation(fields: [cityId], references: [id])
+  owner             User?     @relation("LeadOwner", fields: [ownerId], references: [id])
+  city              City?     @relation(fields: [cityId], references: [id])
   convertedClient   Client?   @relation(fields: [convertedClientId], references: [id])
 
+  // Enforces §6/§7 dedupe at the database, not just in the import script.
+  @@unique([workspaceId, phone])
   @@index([workspaceId, stage])
+  @@index([workspaceId, kind])
   @@map("leads")
 }
 
@@ -564,8 +637,16 @@ model Vendor {
   id          String       @id @default(uuid()) @db.Uuid
   workspaceId String       @map("workspace_id") @db.Uuid
   name        String
-  category    String
-  cityId      String       @map("city_id") @db.Uuid
+  /// Nullable: F&B supplier categorisation is a later UI pass (§4).
+  category    String?
+  /// Nullable for the same reason as Client.cityId — see that comment.
+  cityId      String?      @map("city_id") @db.Uuid
+  contactName String?      @map("contact_name")
+  email       String?
+  phone       String?
+  phoneRaw    String?      @map("phone_raw")
+  address     String?
+  source      String?
   rating      Decimal?     @db.Decimal(2, 1)
   gstin       String?
   status      VendorStatus @default(APPROVED)
@@ -576,7 +657,7 @@ model Vendor {
   deletedAt   DateTime?    @map("deleted_at")
 
   workspace         Workspace          @relation(fields: [workspaceId], references: [id])
-  city              City               @relation(fields: [cityId], references: [id])
+  city              City?              @relation(fields: [cityId], references: [id])
   contacts          VendorContact[]
   projectVendors    ProjectVendor[]
   purchaseRequests  PurchaseRequest[]
@@ -1519,9 +1600,19 @@ model Freelancer {
   id             String    @id @default(uuid()) @db.Uuid
   workspaceId    String    @map("workspace_id") @db.Uuid
   name           String
-  cityId         String    @map("city_id") @db.Uuid
-  certExpiresAt  DateTime  @map("cert_expires_at") // IBG/BCII bartender certification expiry
-  dayRate        Decimal   @map("day_rate") @db.Decimal(10, 2)
+  /// Nullable for the same reason as Client.cityId — see that comment.
+  cityId         String?   @map("city_id") @db.Uuid
+  phone          String?
+  phoneRaw       String?   @map("phone_raw")
+  /// Free-text role from the roster, e.g. "BARTENDER", "CHEF".
+  category       String?
+  source         String?
+  /// IBG/BCII bartender certification expiry. Nullable because the real
+  /// staffing roster records none — and a fabricated expiry date would drive
+  /// real compliance decisions on event day. Unknown must stay unknown.
+  certExpiresAt  DateTime? @map("cert_expires_at")
+  /// Nullable: real day rates are negotiated per event, not in the roster.
+  dayRate        Decimal?  @map("day_rate") @db.Decimal(10, 2)
   eventsCount    Int       @default(0) @map("events_count")
   rating         Decimal?  @db.Decimal(2, 1)
   isAvailable    Boolean   @default(true) @map("is_available")
@@ -1530,8 +1621,9 @@ model Freelancer {
   deletedAt      DateTime? @map("deleted_at")
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
-  city      City      @relation(fields: [cityId], references: [id])
+  city      City?     @relation(fields: [cityId], references: [id])
 
+  @@unique([workspaceId, phone])
   @@map("freelancers")
 }
 
