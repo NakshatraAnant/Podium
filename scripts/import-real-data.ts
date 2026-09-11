@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import * as XLSX from "xlsx";
+import { assertNotForbidden } from "./forbidden-sheet";
 
 const prisma = new PrismaClient();
 
@@ -38,17 +39,7 @@ const CHUNK = 2_000;
 // §1 — the forbidden sheet
 // =========================================================================
 
-/**
- * Hard guard, not a filter. Anything that reaches a sheet whose name mentions
- * passwords is a bug in this script, so it throws loudly instead of skipping:
- * a silent skip would let a future refactor start reading credentials without
- * anyone noticing.
- */
-function assertNotForbidden(sheetName: string): void {
-  if (/PASSWORD/i.test(sheetName)) {
-    throw new Error("Refusing to read a credentials sheet. This sheet must never be opened, parsed, or logged.");
-  }
-}
+export { assertNotForbidden } from "./forbidden-sheet";
 
 // =========================================================================
 // §2 — phone normalization
@@ -328,6 +319,7 @@ async function purgeSyntheticData(tx: Tx) {
   await tx.eventDayIncident.deleteMany({});
   await tx.inventoryReservation.deleteMany({});
   await tx.goodsReceipt.deleteMany({});
+  await tx.purchaseOrderItem.deleteMany({});
   await tx.purchaseOrder.deleteMany({});
   await tx.purchaseRequest.deleteMany({});
   await tx.budgetLine.deleteMany({});
@@ -1169,7 +1161,14 @@ async function importRetail(wb: XLSX.WorkBook, wsId: string, clientByPhone: Map<
   };
 }
 
-main()
+/**
+ * Only runs when this file is executed directly. Importing it (a test reaching
+ * for one helper, a future script reusing the parsers) must never purge and
+ * reload the database — which is exactly what happened once before this guard
+ * existed.
+ */
+if (require.main === module) {
+  main()
   .then(async (report) => {
     await prisma.$disconnect();
     console.log("\n===== IMPORT REPORT =====");
@@ -1180,3 +1179,4 @@ main()
     await prisma.$disconnect();
     process.exit(1);
   });
+}

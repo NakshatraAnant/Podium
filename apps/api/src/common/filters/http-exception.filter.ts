@@ -1,5 +1,6 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from "@nestjs/common";
 import type { Response } from "express";
+import { redactError } from "../redact";
 
 /**
  * Standard error envelope per blueprint §40: { error: { code, message, details } }.
@@ -31,8 +32,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
       }
       code = HttpStatus[status] ?? "HTTP_ERROR";
     } else if (exception instanceof Error) {
-      this.logger.error(exception.message, exception.stack);
-      message = exception.message;
+      /**
+       * Unexpected errors get redacted before they touch a log. Prisma renders
+       * the offending row into its messages, so an insert that violates a
+       * constraint would otherwise write a real customer's phone number and
+       * e-mail into plaintext logs. The entity id survives redaction, which is
+       * what is actually needed to investigate.
+       */
+      const safe = redactError(exception);
+      this.logger.error(safe.message, safe.stack);
+      // The client gets a generic message: an internal error's text is a
+      // detail of our implementation, not something a caller should parse.
+      message = "Something went wrong.";
     }
 
     res.status(status).json({ error: { code, message, details } });

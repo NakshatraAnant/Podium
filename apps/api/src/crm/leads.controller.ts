@@ -50,6 +50,18 @@ export class LeadsController {
     return this.leads.updateStage(user, id, body.stage);
   }
 
+  /**
+   * Marks a lead Won and lets the automation engine decide whether a project
+   * can be created from it. Returns the engine's outcome so a BLOCKED result —
+   * "this lead has no event date" — is visible to the caller rather than silent.
+   */
+  @Post(":id/mark-won")
+  @RequirePermissions("leads:edit")
+  @Audit("lead", "lead.marked_won")
+  markWon(@CurrentUser() user: RequestUser, @Param("id") id: string) {
+    return this.leads.markWon(user, id);
+  }
+
   @Post(":id/convert")
   @RequirePermissions("leads:edit", "projects:create")
   @Audit("lead", "lead.won_converted")

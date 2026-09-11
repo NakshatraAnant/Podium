@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import type { ConvertLeadInput, CreateLeadInput } from "@podium/shared-types";
+import { AutomationService } from "../automation/automation.service";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
@@ -22,6 +23,7 @@ export class LeadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cityScope: CityScopeService,
+    private readonly automation: AutomationService,
   ) {}
 
   /**
@@ -67,7 +69,17 @@ export class LeadsService {
     if (stage === "WON") {
       throw new BadRequestException("Use POST /leads/:id/convert to move a lead to Won — it needs project details automation au1 can't infer.");
     }
-    return this.prisma.client.lead.update({ where: { id: lead.id }, data: { stage, updatedById: user.id } });
+    const updated = await this.prisma.client.lead.update({ where: { id: lead.id }, data: { stage, updatedById: user.id } });
+
+    // Fire the event triggers inline, after the write has committed, so an
+    // automation failure can never roll back the stage change that caused it.
+    await this.automation.emit({
+      trigger: `lead.stage_changed:${stage}`,
+      workspaceId: user.workspaceId,
+      entityId: lead.id,
+      entityType: "lead",
+    });
+    return updated;
   }
 
   /**
@@ -154,5 +166,25 @@ export class LeadsService {
 
       return { lead: wonLead, client, project };
     });
+  }
+
+  /**
+   * Marks a lead Won without the manual conversion flow — the path the
+   * automation engine's Deal-Won rule reacts to. Kept separate from
+   * `updateStage`, which refuses WON precisely because a human conversion
+   * needs project details.
+   */
+  async markWon(user: RequestUser, id: string) {
+    const lead = await this.prisma.client.lead.findFirst({ where: { id, workspaceId: user.workspaceId, deletedAt: null } });
+    if (!lead) throw new NotFoundException("Lead not found.");
+    this.cityScope.assertCanAccessCity(user, lead.cityId);
+    const updated = await this.prisma.client.lead.update({ where: { id: lead.id }, data: { stage: "WON", updatedById: user.id } });
+    const results = await this.automation.emit({
+      trigger: "lead.stage_changed:Won",
+      workspaceId: user.workspaceId,
+      entityId: lead.id,
+      entityType: "lead",
+    });
+    return { lead: updated, automation: results };
   }
 }

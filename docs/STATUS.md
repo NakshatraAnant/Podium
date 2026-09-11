@@ -9,6 +9,186 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-2 Phases 4, 5, 8-12 — 2026-09-11 (second build session)
+
+Everything below was verified by running it: real requests against the real
+dataset, real database queries, real test runs. **105 tests pass** (up from 23).
+
+### Process fix: a real shadow database
+
+`podium_shadow` now exists, is declared as `shadowDatabaseUrl` in
+`schema.prisma`, is created by docker-compose on first boot
+(`scripts/db-init/`), and is documented in `.env.example` with the reason. Every
+migration in this session was diffed against it, with real row counts checked
+before and after each apply. **`--shadow-database-url` will never be pointed at
+`DATABASE_URL` again** — the previous session's incident wiped the dev database
+and was survivable only because the data was still seed-generated.
+
+### §2 Phase 4 — chat @mention -> task promotion (13 tests)
+
+Mentions resolve against the real 15-person roster by e-mail local part, full
+name, then first name, and **refuse to resolve when a first name is ambiguous**
+rather than assigning work to the wrong colleague. Promotion is one transaction:
+the task, a Podium Bot confirmation in the channel, an assignee notification and
+an audit row. The due date is never inferred — a guessed deadline is a guessed
+commitment. Gated on `tasks:create` **or** membership of that project.
+
+The end-to-end half runs against the seeded fixture because it needs a project
+channel and the production database has zero projects (§0.-1). The employees are
+real in both: the roster survives the import untouched.
+
+### §3 Phase 5 — procurement (10 tests)
+
+`purchase_requests` -> approval gate -> `purchase_orders` -> partial
+`goods_receipts` -> inventory ledger. Schema gained `purchase_order_items` (a
+partial receipt needs something to be partial *against*),
+`goods_receipts.location_id`, a `CLOSED` order status, and a configurable
+`workspaces.procurement_approval_threshold`.
+
+Receipts write through `InventoryService.recordMovementInTx`, the same
+row-locked path every other movement uses, rather than a second copy that could
+drift. The test asserts reconciliation with a **direct SQL aggregate** after a
+partial receipt and the remainder. Over-receiving is rejected per line against
+what is outstanding; PO status is derived from receipts, never set by the caller.
+
+**A real control weakness was found by running these tests.** The Operations
+role legitimately holds `inventory:approve` (it approves stock adjustments), so
+the permission check alone let the person who raised a purchase approve it
+themselves. The requester is now refused **regardless of role, including Founder
+and Admin** — an approval gate the requester can clear is not a gate.
+
+### §4 Phase 8 — event day (11 tests)
+
+Run-of-show with owner-or-PM-or-manager tick accountability, idempotent crew
+check-in against real employees, and an incident log where HIGH/CRITICAL
+escalates **in the same transaction as the incident**: a `risks` row owned by the
+PM, a PM notification, and a bot message in the project channel. Asserted against
+the database, not the response body — "stored the incident" and "escalated the
+incident" are exactly the two things that are easy to confuse.
+
+**No realtime infrastructure exists in this build** (no socket.io, no gateway,
+no WebSocket anywhere — checked, not assumed). These are REST endpoints; live
+push is a documented follow-up, not a claim.
+
+### §5 Phase 9 — Google integration (10 tests)
+
+**Built:** `google_accounts` with AES-256-GCM encrypted tokens, `is_sandbox`
+flags on `emails`/`meetings`, the full endpoint surface, and the sender ->
+client/vendor/lead linking logic, which runs identically in sandbox and live
+mode and is therefore genuinely exercised.
+
+**Blocked on credentials AMM must supply:** every actual Google network call.
+`LiveGmailProvider` throws with the remaining work documented inline rather than
+shipping code that has never run against a real Workspace account.
+
+Three explicit modes, because the failure being guarded against is a demo that
+looks live: `disabled` (default — every endpoint 503s with setup steps, *not* an
+empty inbox that reads as "no mail today"), `sandbox` (fixture data from
+`@example.invalid`, never sends, never simulates a successful OAuth flow), and
+`live` (refuses to activate unless all three credentials are present, rather
+than failing later at the first API call). No code path writes a connected
+account without a real token exchange; a test asserts it.
+
+See `docs/integration-setup.md` for the exact credential list.
+
+### §6 Phase 10 — reports (11 tests)
+
+Actuals are computed only from real invoices, payments, expenses and *received*
+purchase orders. Net revenue excludes GST (tax collected is money held for the
+state, not revenue) and the test asserts `net + gst == gross` exactly. An empty
+period returns `hasData: false` with an explanation rather than a zero that looks
+computed, and `grossMarginPct` is **null**, not 0%, when there is no denominator.
+
+Forecast is a separate endpoint returning `kind: "forecast"`, shares no field
+name with actuals (`projectedNetRevenue`, not `netRevenue`), and **refuses to
+produce numbers at all when there are no actuals to anchor a baseline on**. A
+caller may supply an explicit baseline — that is a stated assumption — but the
+system never invents one. A test asserts no endpoint returns both kinds.
+
+### §7 Phase 11 — the automation engine now actually runs (12 tests)
+
+This was the largest "looks live, isn't" gap in the build: ten seeded rules with
+nothing executing them. There is now a real evaluator.
+
+- **Idempotent**: every run is keyed `(ruleId, triggeredBy, triggerHash)` behind
+  a unique index, and the key is claimed *before* the action runs, so concurrent
+  deliveries race on the insert instead of both proceeding. Replaying a Won
+  event four times produces one project and one run row.
+- **Honest about missing data**: a new `BLOCKED` run status records that the
+  trigger matched but the action cannot run, naming the fields a human must
+  supply. This is what makes the Deal-Won rule safe under §1.
+- **Retry with backoff** (1s/5s/30s, 4 attempts) and a full `automation_runs`
+  log covering success, blocked and failed.
+
+Three rules verified against real data changes:
+
+| Rule | Trigger kind | Verified |
+| --- | --- | --- |
+| Deal Won -> Project | event | BLOCKED on a real-shaped lead, creating nothing; SUCCESS only when city, date, value, client **and** a PM for that city all exist |
+| Low stock -> notify | threshold | Detected from the real ledger; does not re-notify on a second sweep |
+| Licence not approved T-7 | time-relative | Raises a real risk + PM notification; skips already-approved licences |
+
+**A second real gap surfaced:** AMM's roster staffs Project Managers in Jaipur
+and Udaipur only. A Won lead in Delhi, Mumbai, Bengaluru or Goa has no PM to own
+the project, so the rule blocks and says so rather than assigning the project to
+whoever happens to be first in the table.
+
+Per §1, Deal-Won **only** creates a project when every field is genuinely
+present. Against AMM's real leads it blocks every time, which is the correct
+outcome, not a failure.
+
+**The cron was verified firing autonomously, not just via its endpoint.** With
+the API running and no HTTP request made, a genuine low-stock condition produced
+12 SUCCESS runs at `13:10:00.025 UTC` — exactly the `0 */10 * * * *` boundary —
+each with a real notification ("Low stock: Juniper Berries 100 g at Bengaluru
+Store is 1, below its reorder level of 2"). An earlier attempt at this check was
+discarded because a concurrently-running test suite had produced the rows, which
+would have proved nothing.
+
+Runs in-process on `@nestjs/schedule` (10-minute sweep) rather than a BullMQ
+worker — the same documented shortcut as the SLA sweep. It would double-fire
+across multiple API instances, which is survivable only because every run is
+idempotent. Moving these to `workers/` remains the follow-up.
+
+### §8 Phase 12 — hardening
+
+**Backups now exist** (`scripts/backup-db.sh`, nightly crontab in
+`scripts/podium-backup.cron`, documented in `docs/backup-and-restore.md`). The
+script verifies the dump with `pg_restore --list` and fails if fewer than 10
+tables carry data, so a corrupt or half-finished file cannot pass as a backup.
+**A dump was actually restored into `podium_shadow` and row counts compared
+table by table — all MATCH.** A backup nobody has restored is a hypothesis.
+Still missing: off-host copies and point-in-time recovery; the recovery point
+is currently "last nightly dump".
+
+**PII no longer reaches plaintext logs.** Prisma embeds the offending row in its
+error messages, so an unhandled insert error would have written real phone
+numbers and e-mails into logs — with 52,024 real customer records, that is not
+hypothetical. `redactPii()` masks phone-shaped numbers and e-mails in both the
+log line and the stack, and unexpected errors now return a generic message to
+the caller instead of internal text. The Zod pipe was checked and does not echo
+submitted values.
+
+**The forbidden-sheet guard has a regression test.** `assertNotForbidden` moved
+to its own dependency-free module (`scripts/forbidden-sheet.ts`) and is tested
+against the exact sheet name, variants, and the legitimate sheets — including an
+explicit assertion that it *throws* rather than silently skipping.
+
+Fixing that test exposed a genuine bug: importing `import-real-data.ts` for one
+helper **executed the whole destructive import**. The entrypoint is now guarded
+by `require.main === module`.
+
+**The inventory concurrency test is no longer order-dependent.** It used to
+consume the seeded Goa stock it asserted on, so it passed on a fresh seed and
+failed on a second consecutive run. It now brings the balance to a known
+quantity through real ledger movements first — verified by running the suite
+twice in a row without re-seeding.
+
+**RBAC re-verified at volume against the real 65,108-row dataset: 31/31 checks
+pass.** 52k clients page in 49ms; a Delhi-scoped user sees exactly 181 of 12,381
+cold prospects, matching a direct SQL count, with zero leaks and zero
+unassigned-city rows.
+
 ## 0.-1 Real projects and invoices: what the data actually supports (2026-09-11)
 
 **No `projects` and no `invoices` rows were created. Zero of AMM's imported

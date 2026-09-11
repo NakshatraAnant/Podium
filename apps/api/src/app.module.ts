@@ -19,6 +19,7 @@ import { GovernanceModule } from "./governance/governance.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { InvoicesModule } from "./invoices/invoices.module";
 import { GoogleModule } from "./google/google.module";
+import { AutomationModule } from "./automation/automation.module";
 import { EventDayModule } from "./eventday/eventday.module";
 import { ProcurementModule } from "./procurement/procurement.module";
 import { ReportsModule } from "./reports/reports.module";
@@ -40,6 +41,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     CitiesModule,
     ClientsModule,
     CrmModule,
+    AutomationModule,
     EventDayModule,
     GoogleModule,
     ProcurementModule,

@@ -287,6 +287,11 @@ enum AutomationRunStatus {
   SUCCESS
   FAILED
   RETRYING
+  /// The trigger fired and matched, but the action could not run because the
+  /// underlying record lacks fields a human must supply. Recorded as a real
+  /// run so the gap is visible and countable — never silently skipped, and
+  /// never worked around by inventing the missing data.
+  BLOCKED
 }
 
 enum IncidentSeverity {

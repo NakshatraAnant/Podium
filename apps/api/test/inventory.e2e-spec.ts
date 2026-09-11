@@ -27,11 +27,38 @@ describe("Inventory ledger concurrency (e2e)", () => {
     await app.close();
   });
 
+  /**
+   * Creates its own stock rather than consuming the fixture's.
+   *
+   * This test used to read the seeded Goa quantity of SP-CAM and consume it to
+   * zero, which made it pass on a freshly seeded database and fail on a second
+   * consecutive run — the suite was only green because CI seeds first. It now
+   * receives a known quantity through the real ledger and consumes exactly
+   * that, so it is idempotent and can run any number of times.
+   */
   it("never lets concurrent CONSUME movements take on-hand stock negative", async () => {
     const location = await prisma.inventoryLocation.findFirstOrThrow({ where: { name: "Goa Store" } });
-    const item = await prisma.inventoryItem.findFirstOrThrow({ where: { sku: "SP-CAM" } }); // low seeded qty in Goa: 2
+    const item = await prisma.inventoryItem.findFirstOrThrow({ where: { sku: "SP-CAM" } });
+
+    // Bring the balance to a known 2 via real RECEIVE/CONSUME movements — never
+    // by writing inventory_balances directly, which is the rule this whole
+    // module exists to enforce.
+    const current = await prisma.inventoryBalance.findFirst({ where: { skuId: item.id, locationId: location.id } });
+    const delta = 2 - (current?.qtyOnHand ?? 0);
+    if (delta !== 0) {
+      const res = await request(app.getHttpServer())
+        .post("/api/inventory/movements")
+        .set("Authorization", `Bearer ${token}`)
+        .send(
+          delta > 0
+            ? { skuId: item.id, type: "RECEIVE", toLocationId: location.id, qty: delta, note: "test setup" }
+            : { skuId: item.id, type: "CONSUME", fromLocationId: location.id, qty: -delta, note: "test setup" },
+        );
+      expect(res.status).toBe(201);
+    }
+
     const before = await prisma.inventoryBalance.findFirstOrThrow({ where: { skuId: item.id, locationId: location.id } });
-    expect(before.qtyOnHand).toBeGreaterThan(0);
+    expect(before.qtyOnHand).toBe(2);
 
     // Fire 5 concurrent consumes of 1 unit each against a balance that can only satisfy `before.qtyOnHand` of them.
     const attempts = Array.from({ length: 5 }, () =>
