@@ -52,6 +52,29 @@ describe("Inventory ledger concurrency (e2e)", () => {
     expect(after.qtyOnHand).toBeGreaterThanOrEqual(0);
   });
 
+  /**
+   * Regression test for a real bug a production-readiness audit found: every
+   * test in this file (deliberately, for the concurrency test's multi-city
+   * needs) ran as an ALL-city-scope Admin/Founder user, which meant
+   * GET /inventory/balances's city-scope-filtered code path was never
+   * exercised. A city-scoped (non-ALL) caller hit a 500 — the scope filter
+   * was nested one level too deep (`location.city.cityId` instead of
+   * `location.cityId`; City's own key is `id`, not `cityId`). Fixed in
+   * InventoryService.listBalances; this test pins it down so a future
+   * refactor of the scope-filter shape can't silently reintroduce it.
+   */
+  it("a city-scoped (non-ALL) user can list balances, restricted to their own city", async () => {
+    // Devansh Jain: Operations role, city access = Jaipur only (not ALL).
+    const scopedToken = await loginAs(app, "devansh.jain@ammbrands.in");
+    const res = await request(app.getHttpServer())
+      .get("/api/inventory/balances")
+      .set("Authorization", `Bearer ${scopedToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBeGreaterThan(0);
+    const cities = new Set(res.body.map((b: { location: { city: { name: string } } }) => b.location.city.name));
+    expect([...cities]).toEqual(["Jaipur"]);
+  });
+
   it("a transfer moves stock atomically between two locations", async () => {
     const item = await prisma.inventoryItem.findFirstOrThrow({ where: { sku: "SP-VOD-AB" } });
     const from = await prisma.inventoryLocation.findFirstOrThrow({ where: { name: "Jaipur Store" } });

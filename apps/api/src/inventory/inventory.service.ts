@@ -33,9 +33,20 @@ export class InventoryService {
   ) {}
 
   async listBalances(user: RequestUser, cityId?: string) {
+    // scopeFilter() returns a filter shaped for a model with its own
+    // `cityId` column (e.g. `{ cityId: { in: [...] } }`) -- InventoryLocation
+    // has that column directly, so the scope applies to `location`, not to
+    // `location.city` (City's own key is `id`, not `cityId`; nesting the
+    // scope filter there produced an invalid Prisma query that 500'd for
+    // every non-ALL-scope caller -- caught by the RBAC audit, not by the
+    // original test suite, since every inventory test happened to run as
+    // an ALL-scope Admin/Founder user).
     const scope = this.cityScope.scopeFilter(user, cityId);
     return this.prisma.client.inventoryBalance.findMany({
-      where: { location: { city: { workspaceId: user.workspaceId, ...scope } } },
+      where: {
+        item: { workspaceId: user.workspaceId },
+        location: { ...scope },
+      },
       include: { item: true, location: { include: { city: true } } },
       orderBy: [{ item: { name: "asc" } }],
     });

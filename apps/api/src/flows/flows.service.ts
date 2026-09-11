@@ -141,6 +141,20 @@ export class FlowsService {
   async reassignStep(user: RequestUser, stepId: string, newOwnerId: string) {
     return this.prisma.client.$transaction(async (tx) => {
       const step = await this.loadStepForAction(tx, user, stepId, { requireManagerOverride: true });
+
+      // Reassigning to someone with no access to this project's city would
+      // silently create an unreachable step: the new "owner" would be
+      // city-scope-blocked from ever starting/completing it themselves,
+      // recoverable only by a manager-override action. Caught by this
+      // session's own RBAC/flow-engine audit (reassigning a Udaipur-project
+      // step to a Jaipur-only Operations user produced exactly that stuck
+      // state) — reject it up front instead.
+      const newOwnerAccess = await tx.userCityAccess.findMany({ where: { userId: newOwnerId } });
+      const hasAccess = newOwnerAccess.some((g) => g.scope === "ALL" || g.cityId === step.flowInstance.project.cityId);
+      if (!hasAccess) {
+        throw new BadRequestException("The new owner does not have access to this project's city — reassignment would leave the step unreachable to them.");
+      }
+
       const updated = await tx.flowStep.update({ where: { id: step.id }, data: { ownerId: newOwnerId } });
       if (step.status === "READY" || step.status === "ACTIVE") {
         await this.notifyAndBotDm(tx, step.flowInstance.project.workspaceId, newOwnerId, "⇢", `${user.name} assigned you "${step.name}" in ${step.flowInstance.name}. It's ready now.`, step.flowInstance.projectId);

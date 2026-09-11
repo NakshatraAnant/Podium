@@ -118,4 +118,32 @@ describe("Flow engine (e2e)", () => {
     const gId = (instance.steps as Array<{ key: string; id: string }>).find((s) => s.key === "g")!.id;
     await post(`/api/flow-steps/${gId}/complete`).expect(400);
   });
+
+  /**
+   * Regression test for a real bug a production-readiness audit found:
+   * reassignStep never checked whether the new owner actually has
+   * city-scope access to the flow's project. Reassigning a step on this
+   * (Udaipur) project to a Jaipur-only Operations user silently "succeeded"
+   * and left the step owned by someone who would then get a 403 from
+   * every other flow-step endpoint for it — reachable only by a manager
+   * override, never by its own listed owner. Fixed in
+   * FlowsService.reassignStep; pinned down here.
+   */
+  it("rejects reassigning a step to a user with no city access to the project", async () => {
+    const instance = (await post("/api/flow-instances", {
+      templateId,
+      projectId, // a Udaipur project (Rathi-Sharma)
+      ownerOverrides: { a: founderId, b: founderId, c: founderId, d: founderId, e: founderId, f: founderId, g: founderId },
+    })).body;
+    const bId = (instance.steps as Array<{ key: string; id: string }>).find((s) => s.key === "b")!.id;
+
+    const jaipurOnlyUser = await prisma.user.findFirstOrThrow({ where: { email: "devansh.jain@ammbrands.in" } });
+    const rejected = await post(`/api/flow-steps/${bId}/reassign`, { newOwnerId: jaipurOnlyUser.id });
+    expect(rejected.status).toBe(400);
+
+    const udaipurUser = await prisma.user.findFirstOrThrow({ where: { email: "lakshya.chouhan@ammbrands.in" } });
+    const accepted = await post(`/api/flow-steps/${bId}/reassign`, { newOwnerId: udaipurUser.id });
+    expect(accepted.status).toBe(201);
+    expect(accepted.body.ownerId).toBe(udaipurUser.id);
+  });
 });

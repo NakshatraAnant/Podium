@@ -497,29 +497,74 @@ async function main() {
     });
     itemBySku[it.sku] = item;
     for (let i = 0; i < CITIES.length; i++) {
+      const location = locationByCity[CITIES[i].key];
+      // Balances are never written with a nonzero opening quantity directly —
+      // even seed data goes through the ledger, so `SUM(inventory_movements)`
+      // reconstructs the true balance for every SKU/location, seeded or not.
+      // (An earlier version of this seed set qtyOnHand directly here, which
+      // technically violated the "balance is always derived from the
+      // ledger" invariant for opening stock specifically — caught by a
+      // production-readiness audit that cross-checked recorded balances
+      // against summed movements and found seeded rows didn't reconcile.)
       await db.inventoryBalance.create({
-        data: { skuId: item.id, locationId: locationByCity[CITIES[i].key].id, qtyOnHand: it.qty[i], reorderLevel: it.reorder[i] },
+        data: { skuId: item.id, locationId: location.id, qtyOnHand: 0, reorderLevel: it.reorder[i] },
       });
+      if (it.qty[i] > 0) {
+        await db.inventoryMovement.create({
+          data: {
+            skuId: item.id,
+            type: "RECEIVE",
+            toLocationId: location.id,
+            qty: it.qty[i],
+            actorId: userByKey.u7.id,
+            refType: "opening_stock",
+            note: "Opening stock (seed baseline)",
+          },
+        });
+        await db.inventoryBalance.update({
+          where: { skuId_locationId: { skuId: item.id, locationId: location.id } },
+          data: { qtyOnHand: it.qty[i] },
+        });
+      }
     }
   }
-  const seedMovements: Array<[string, "TRANSFER_OUT" | "TRANSFER_IN" | "DAMAGE" | "RECEIVE" | "CONSUME", string | null, string | null, number, string]> = [
-    ["SP-GIN-BS", "TRANSFER_OUT", "Jaipur", "Udaipur", 12, "Rathi tasting + sangeet buffer"],
+  // Historical/demo movements layered on top of opening stock. Each one
+  // actually adjusts inventory_balances too (mirroring exactly what
+  // InventoryService.applyBalanceDelta does at runtime for real requests) --
+  // an earlier version of this seed inserted these ledger rows without ever
+  // touching the balance, which meant the "balance = SUM(movements)"
+  // invariant silently didn't hold for the demo data. Same audit finding as
+  // the opening-stock fix above, same fix: nothing in this seed script
+  // writes qtyOnHand without a movement backing it, and no movement here is
+  // left unapplied.
+  async function applySeedBalanceDelta(skuId: string, locationId: string, delta: number) {
+    await db.inventoryBalance.update({
+      where: { skuId_locationId: { skuId, locationId } },
+      data: { qtyOnHand: { increment: delta } },
+    });
+  }
+  const seedMovements: Array<[string, "TRANSFER" | "DAMAGE" | "RECEIVE" | "CONSUME", string | null, string | null, number, string]> = [
+    ["SP-GIN-BS", "TRANSFER", "Jaipur", "Udaipur", 12, "Rathi tasting + sangeet buffer"],
     ["GL-HB", "DAMAGE", "Goa", null, 40, "Chipped — monsoon audit"],
     ["MX-TON-SP", "RECEIVE", null, "Jaipur", 240, "Cellar Door GRN #7781"],
     ["SP-WHI-JM", "CONSUME", "Delhi", null, 22, "Pernod Trade Night closure"],
   ];
-  for (const [sku, type, from, to, qty, note] of seedMovements) {
-    await db.inventoryMovement.create({
-      data: {
-        skuId: itemBySku[sku].id,
-        type,
-        fromLocationId: from ? locationByCity[from].id : null,
-        toLocationId: to ? locationByCity[to].id : null,
-        qty,
-        actorId: userByKey.u7.id,
-        note,
-      },
-    });
+  for (const [sku, kind, from, to, qty, note] of seedMovements) {
+    const skuId = itemBySku[sku].id;
+    const fromLocationId = from ? locationByCity[from].id : undefined;
+    const toLocationId = to ? locationByCity[to].id : undefined;
+    if (kind === "TRANSFER") {
+      // Mirrors InventoryService.transfer(): one TRANSFER_OUT row + one
+      // TRANSFER_IN row, both carrying the same from/to/qty.
+      await db.inventoryMovement.create({ data: { skuId, type: "TRANSFER_OUT", fromLocationId, toLocationId, qty, actorId: userByKey.u7.id, note } });
+      await db.inventoryMovement.create({ data: { skuId, type: "TRANSFER_IN", fromLocationId, toLocationId, qty, actorId: userByKey.u7.id, note } });
+      await applySeedBalanceDelta(skuId, fromLocationId!, -qty);
+      await applySeedBalanceDelta(skuId, toLocationId!, qty);
+    } else {
+      await db.inventoryMovement.create({ data: { skuId, type: kind, fromLocationId, toLocationId, qty, actorId: userByKey.u7.id, note } });
+      if (kind === "RECEIVE") await applySeedBalanceDelta(skuId, toLocationId!, qty);
+      else await applySeedBalanceDelta(skuId, fromLocationId!, -qty); // DAMAGE, CONSUME
+    }
   }
   // A handful of event reservations mirroring the prototype's ALLOC seed.
   const ALLOC: Array<[string, string, string, number]> = [

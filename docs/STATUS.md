@@ -1,9 +1,71 @@
 # Podium v2 — Build Status
 
-*Last updated: end of the initial build session (single continuous engagement).
-This file is the authoritative "what's actually true" document — read it before
-assuming any phase, screen, or endpoint is production-ready. `docs/screens.md`
-is the functional spec; this file is the honest progress report against it.*
+*Last updated: after a second-session production-readiness audit (2026-09-11)
+that re-verified everything below by actually running it — real requests,
+real database queries, real test runs — rather than trusting the prior
+session's own claims. This file is the authoritative "what's actually true"
+document — read it before assuming any phase, screen, or endpoint is
+production-ready. `docs/screens.md` is the functional spec; this file is the
+honest progress report against it.*
+
+## 0.1 Audit — 2026-09-11: what was checked, what was found, what was fixed
+
+A full re-audit was run against the live app (not read from memory): schema
+vs. a live `pg_tables` query, RBAC tested with real requests across all 10
+roles (creating temporary test accounts for Employee/Client/Vendor, since
+**no seeded demo user exists for those three roles** — a real, still-open
+gap; see §3.9 below), the flow engine driven through start/complete/
+reassign/AND-join with `flow_step_runs` checked row-by-row in the database,
+a real invoice issued for both the intra- and inter-state GST cases plus a
+credit note, and a real 15-way concurrent inventory write.
+
+**Two genuine production bugs were found and fixed, each backed by a new
+permanent regression test** (`apps/api/test/*.e2e-spec.ts`, not just this
+session's scratch scripts):
+
+1. **`GET /inventory/balances` 500'd for every non-ALL-scope caller.**
+   `InventoryService.listBalances` nested the city-scope filter as
+   `location: { city: { cityId: {...} } }` — but `City`'s own key is `id`,
+   not `cityId`; that shape is only valid one level up, directly on
+   `location`. Every inventory test in the original suite happened to run
+   as an ALL-scope Admin/Founder user, so this never 500'd until the audit
+   specifically logged in as a Jaipur-scoped Operations user. Fixed by
+   applying the scope filter to `location` directly.
+2. **`reassignStep` could hand a flow step to an owner with no city access
+   to that project**, leaving it permanently unreachable to them (every
+   other flow-step endpoint would then 403 them on it; only a
+   `flows:edit` manager-override could ever move it again). Found by
+   reassigning a step on a Udaipur project to a Jaipur-only Operations
+   user and watching them get rejected from completing their own assigned
+   step. Fixed by validating the new owner's `user_city_access` before
+   allowing the reassignment.
+
+**One data-integrity gap was found in the seed script itself** (not the
+runtime code, which was already correct): initial stock quantities were
+written directly to `inventory_balances` with no backing
+`inventory_movements` row, and four "historical" demo movements were
+inserted into the ledger without ever updating the balance they implied —
+so `SUM(inventory_movements)` did not reconstruct the recorded balance for
+seeded data, even though it did for anything created through the API at
+runtime. Fixed: opening stock is now a real `RECEIVE` movement per
+SKU/location, and every seed movement updates the balance it implies.
+Verified after the fix: **all 120 balance rows reconcile exactly against
+`SUM(inventory_movements)`, zero mismatches** (checked with a direct SQL
+query, not application code, so the app's own bugs couldn't hide the
+check).
+
+**Confirmed NOT implemented, by direct code search, not inference**: no
+file in `apps/api/src` or `apps/web` references any Google/Gmail API
+(`grep` for `googleapis|gmail.readonly|oauth2` returns only false positives
+from the Google Fonts CSS URL and Next.js build cache — zero real hits); no
+file references `AutomationRule` outside the seed script, and no
+`AutomationModule` is registered in `app.module.ts` at all, not even a
+read-only one; `workers/src` is an empty directory; `BLOCKED` and
+`ESCALATED` exist only as enum values in `schema.prisma`, never written by
+any code path. All of this matches what §1's phase table already said
+before this audit — confirmed accurate, not previously overstated.
+
+Full pass/fail counts and the exact commands run are in §3 below.
 
 ## 0. Read this first
 
@@ -121,7 +183,11 @@ review by anyone but this session.
   owner, or a `flows:edit` holder acting as manager override, can act on a
   given step — this is deliberately *not* gated purely by role, since
   ownership of a specific step (not a broad resource grant) is what the
-  prototype's own model implies.
+  prototype's own model implies. **2026-09-11 audit fix**: `reassignStep`
+  now validates the new owner has `user_city_access` to the project's city
+  before allowing the reassignment — previously it didn't, and a step could
+  be reassigned into a state where its own listed owner would get a 403
+  from every flow-step endpoint (see §0.1).
   - **Not built**: OR-join (schema has `join_type` on `flow_step_dependencies`
     but only `AND` is ever written or evaluated), SLA-breach → `ESCALATED`
     automation (no scheduled job checks `readyAt + slaMinutes` against `now()`
@@ -154,9 +220,27 @@ review by anyone but this session.
   session.** One `POST /inventory/movements` endpoint typed by `type`
   (blueprint §40's own API design), balances row-locked
   (`SELECT ... FOR UPDATE`) and recomputed from the movement inside the same
-  transaction, never written directly. Verified under real concurrency: 5
-  simultaneous `CONSUME` requests against 2 units of stock produce exactly 2
-  successes and 3 rejections, never a negative balance.
+  transaction, never written directly by the runtime code. Verified under
+  real concurrency, twice, in two sessions: 5-way and 15-way concurrent
+  `CONSUME` bursts against known stock levels both produced exactly the
+  right number of successes/rejections and never a negative balance.
+  **2026-09-11 audit correction**: the *seed script* (not the runtime code)
+  had been writing opening stock directly into `inventory_balances` with no
+  backing ledger row, and inserting four "historical" demo movements
+  without ever applying them to the balance — so the "balance = derived
+  from the ledger" invariant held for the API's own write path but not for
+  the fixture data itself. Fixed; a direct SQL reconciliation now confirms
+  all 120 seeded balance rows equal `SUM(inventory_movements)` exactly.
+- ⬜ **Employee, Client, and Vendor roles have no seeded demo users at
+  all** — only Founder, Admin, Project Manager (x2), Operations (x9),
+  Finance, Sales, and Creative are represented among the 15 seeded `users`
+  rows. This was surfaced by the 2026-09-11 RBAC audit, which had to create
+  three temporary throwaway accounts to test those roles at all. Worth
+  adding real seeded users for all 10 roles before the next round of manual
+  testing or a demo — right now anyone poking at the seed data would
+  reasonably assume those roles were never wired up, when actually their
+  permission grants are correct and were verified working via the
+  temporary accounts.
 - ⬜ Menu costing (`recipes`/`recipe_items`) and the "reserve stock from
   guest count × drinks" auto-reservation flow the blueprint describes:
   schema exists, no endpoints, no auto-reservation logic.
@@ -235,13 +319,28 @@ review by anyone but this session.
 
 ## 2. What's genuinely verified (not just written)
 
-- **17 Jest e2e tests** (`apps/api/test/*.e2e-spec.ts`) run against a real
+- **19 Jest e2e tests** (`apps/api/test/*.e2e-spec.ts`) run against a real
   NestJS app instance + local Postgres, not mocks: RBAC enforcement and city
   scoping, the flow engine's AND-join end to end (including "the join must
   NOT fire on the first of two dependencies"), GST split correctness for
   both intra- and inter-state invoices, sequential invoice numbering,
-  invoice immutability (`409` on a second `issue` call), and inventory
-  ledger concurrency safety.
+  invoice immutability (`409` on a second `issue` call), inventory ledger
+  concurrency safety, and — added by the 2026-09-11 audit — regression
+  tests for the two bugs described in §0.1 (a city-scoped user can list
+  inventory balances; reassigning a flow step to a city-mismatched owner is
+  rejected).
+- **The 2026-09-11 audit's own ad hoc scripts** (not committed — they lived
+  in the session's scratch directory) drove real requests against a running
+  server for things the committed suite doesn't cover as exhaustively: all
+  10 RBAC roles individually (including temporary Employee/Client/Vendor
+  test accounts, since none are seeded), a 15-way concurrent inventory
+  write against a real 10-unit balance (10 succeeded, 5 correctly
+  rejected, final balance exactly 0), and a direct SQL reconciliation of
+  all 120 `inventory_balances` rows against `SUM(inventory_movements)`
+  (0 mismatches after the seed fix). These aren't in git; treat this
+  paragraph as the record of that having happened, and re-run the
+  equivalent checks yourself if you need to reconfirm rather than trusting
+  this sentence indefinitely.
 - **A real headless-browser run** (Playwright, not part of the committed
   test suite — a manual verification pass) against the built Next.js
   production server + live API + seeded Postgres: login → dashboard →
