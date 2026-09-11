@@ -188,11 +188,37 @@ review by anyone but this session.
   before allowing the reassignment — previously it didn't, and a step could
   be reassigned into a state where its own listed owner would get a 403
   from every flow-step endpoint (see §0.1).
+- ✅ **SLA escalation — built 2026-09-11, the audit's own recommended next
+  priority.** `FlowSlaService` runs a `@Cron(EVERY_MINUTE)` sweep (inside
+  the API process, not a separate BullMQ worker — see the class's own doc
+  comment for why that's a deliberate, documented shortcut, not an
+  oversight) that finds every `READY`/`ACTIVE` step whose
+  `readyAt + slaMinutes` has passed, transitions it to `ESCALATED`, writes
+  the `flow_step_runs` row (actor = null, system-initiated), raises a
+  `HIGH`-severity project risk, notifies the project's PM (the schema has
+  no formal reporting hierarchy to notify "the owner's manager" the way
+  the blueprint's prose describes, so the PM is the documented stand-in),
+  posts a "Podium Bot" message to the project channel, and writes an
+  `audit_logs` row. A `POST /flows/sla-check` endpoint (Founder/Admin only,
+  gated on `automation:edit`) triggers the identical sweep on demand.
+  Verified two ways: (1) 4 new e2e tests drive the manual endpoint and
+  check every side effect above directly against the database; (2) the
+  *actual* one-minute cron was watched firing on its own, with zero HTTP
+  calls involved, correctly escalating a step that had been backdated past
+  its SLA — confirmed both in the server's own log output and by querying
+  Postgres afterward. Building this also surfaced a real seed-data bug:
+  the demo G&T flow's "in-progress" step was seeded already 16 minutes
+  past its own 10-minute SLA, so it auto-escalated the instant this
+  feature could see it — fixed by re-timing that step's seed data to sit
+  within its SLA, which is itself a small case study in why "the schema
+  and seed data imply X is live" is not the same claim as "X is live."
   - **Not built**: OR-join (schema has `join_type` on `flow_step_dependencies`
-    but only `AND` is ever written or evaluated), SLA-breach → `ESCALATED`
-    automation (no scheduled job checks `readyAt + slaMinutes` against `now()`
-    — this needs the BullMQ worker infrastructure, which doesn't exist yet),
-    automatic reassignment on approved leave.
+    but only `AND` is ever written or evaluated), automatic reassignment on
+    approved leave. The generalized automation engine (`au1`-`au10`, Phase
+    11) is a separate, larger, still-entirely-unbuilt thing from this —
+    see that phase's own section below; this SLA mechanism is specific to
+    the flow engine, per blueprint §6, not a first instance of the general
+    rule runtime.
 - ⬜ Timeline: no dedicated endpoint. It's a pure derived view over
   `projects.eventDate` per `docs/screens.md`'s own note — no page built yet.
 
@@ -319,16 +345,16 @@ review by anyone but this session.
 
 ## 2. What's genuinely verified (not just written)
 
-- **19 Jest e2e tests** (`apps/api/test/*.e2e-spec.ts`) run against a real
+- **23 Jest e2e tests** (`apps/api/test/*.e2e-spec.ts`) run against a real
   NestJS app instance + local Postgres, not mocks: RBAC enforcement and city
   scoping, the flow engine's AND-join end to end (including "the join must
   NOT fire on the first of two dependencies"), GST split correctness for
   both intra- and inter-state invoices, sequential invoice numbering,
   invoice immutability (`409` on a second `issue` call), inventory ledger
-  concurrency safety, and — added by the 2026-09-11 audit — regression
-  tests for the two bugs described in §0.1 (a city-scoped user can list
-  inventory balances; reassigning a flow step to a city-mismatched owner is
-  rejected).
+  concurrency safety, regression tests for the two RBAC/flow-reassignment
+  bugs described in §0.1, and 4 tests for SLA escalation (breach → full
+  side-effect chain, idempotency, a non-breach left untouched, and the
+  `automation:edit` RBAC gate on the manual trigger).
 - **The 2026-09-11 audit's own ad hoc scripts** (not committed — they lived
   in the session's scratch directory) drove real requests against a running
   server for things the committed suite doesn't cover as exhaustively: all
@@ -433,11 +459,17 @@ For quick scanning: `playbooks`, `purchase_requests`/`purchase_orders`/
    eyes on them before investing further, since several of §3's judgment
    calls (RBAC grants especially) are exactly the kind of thing a real user
    will immediately have an opinion about.
-2. **Automation engine runtime** (BullMQ worker + scheduler + rule
-   evaluator) — this is the single biggest gap between "what's seeded" and
-   "what's live," and several other gaps (SLA escalation, licence T-7
-   escalation, invoice-overdue detection, low-stock → PR) all depend on it
-   existing rather than being independent pieces of work.
+2. **The generalized automation engine runtime** (`au1`-`au10`, a real rule
+   evaluator reading `automation_rules.trigger_config`/`actions` jsonb) —
+   flow-engine SLA escalation (§1 Phase 3) is now built as a one-off,
+   flow-specific cron per blueprint §6, which closes that particular gap
+   but does *not* generalize to the other seeded rules. Licence T-7
+   escalation, invoice-overdue detection, and low-stock → purchase-request
+   are still each independently unbuilt and would each need either their
+   own one-off cron (fast, inconsistent with the blueprint's "generalized
+   rule engine" vision) or the real automation engine (slower, the
+   architecturally correct answer). Worth deciding which path deliberately
+   rather than accreting more one-off crons by default.
 3. **Procurement (PO/GRN) and Event Day** — both are pure CRUD + one state
    machine each, following the exact patterns already proven out in this
    codebase (compare to `licences`/`risks`); low risk, clear payoff.

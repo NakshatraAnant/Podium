@@ -5,11 +5,15 @@ import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { RequirePermissions } from "../common/decorators/require-permissions.decorator";
 import { ZodValidationPipe } from "../common/pipes/zod-validation.pipe";
 import type { RequestUser } from "../common/types";
+import { FlowSlaService } from "./flow-sla.service";
 import { FlowsService } from "./flows.service";
 
 @Controller()
 export class FlowsController {
-  constructor(private readonly flows: FlowsService) {}
+  constructor(
+    private readonly flows: FlowsService,
+    private readonly flowSla: FlowSlaService,
+  ) {}
 
   @Get("flow-templates")
   @RequirePermissions("flows:view")
@@ -67,5 +71,20 @@ export class FlowsController {
   @RequirePermissions("flows:view")
   nudgeStep(@CurrentUser() user: RequestUser, @Param("id") id: string) {
     return this.flows.nudgeStep(user, id);
+  }
+
+  /**
+   * Runs the same SLA-breach sweep the one-minute cron runs, on demand.
+   * Gated on `automation:edit` (Founder/Admin only) — this is an
+   * operational trigger for the system's own scheduled job, not a normal
+   * flow action, and city-scope doesn't apply to it since it sweeps every
+   * workspace-wide breach in one pass. Exists both for ops visibility
+   * ("did the sweep actually run today") and so tests don't have to wait
+   * on a real minute of wall-clock time to verify escalation.
+   */
+  @Post("flows/sla-check")
+  @RequirePermissions("automation:edit")
+  runSlaCheck() {
+    return this.flowSla.checkSlaBreaches();
   }
 }

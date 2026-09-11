@@ -788,7 +788,14 @@ async function main() {
     b: { status: "COMPLETED", readyAgo: 50, startAgo: 48, doneAgo: 40 },
     c: { status: "COMPLETED", readyAgo: 50, startAgo: 45, doneAgo: 35 },
     d: { status: "COMPLETED", readyAgo: 40, startAgo: 38, doneAgo: 30 },
-    e: { status: "ACTIVE", readyAgo: 30, startAgo: 26 },
+    // Step e's SLA is 10 minutes (see FLOW_TEMPLATES above) -- readyAgo/startAgo
+    // here must stay under that, or this "nice mid-flight demo" step is
+    // already SLA-breached the instant it's seeded and gets auto-escalated
+    // by FlowSlaService's first cron tick, which isn't the intended demo
+    // state. (Caught by the flow-sla e2e tests expecting exactly one fresh
+    // breach when they backdate their own step — a stale, already-breached
+    // seed step made that count nondeterministic.)
+    e: { status: "ACTIVE", readyAgo: 3, startAgo: 1 },
     f: { status: "LOCKED" },
     g: { status: "LOCKED" },
   };
