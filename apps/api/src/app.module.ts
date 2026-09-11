@@ -18,8 +18,10 @@ import { FlowsModule } from "./flows/flows.module";
 import { GovernanceModule } from "./governance/governance.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { InvoicesModule } from "./invoices/invoices.module";
+import { GoogleModule } from "./google/google.module";
 import { EventDayModule } from "./eventday/eventday.module";
 import { ProcurementModule } from "./procurement/procurement.module";
+import { ReportsModule } from "./reports/reports.module";
 import { ProjectsModule } from "./projects/projects.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { UsersModule } from "./users/users.module";
@@ -39,8 +41,10 @@ import { VendorsModule } from "./vendors/vendors.module";
     ClientsModule,
     CrmModule,
     EventDayModule,
+    GoogleModule,
     ProcurementModule,
     ProjectsModule,
+    ReportsModule,
     TasksModule,
     FlowsModule,
     GovernanceModule,

@@ -424,6 +424,7 @@ model User {
   channelMemberships ChannelMember[]
   auditLogs          AuditLog[]
   leadsOwned         Lead[]            @relation("LeadOwner")
+  googleAccount      GoogleAccount?
   licencesOwned      Licence[]         @relation("LicenceOwner")
   risksOwned         Risk[]            @relation("RiskOwner")
 
@@ -1497,8 +1498,40 @@ model Message {
 // MAIL (Gmail integration — stub-capable, see docs/integration-setup.md)
 // =========================================================================
 
+/// A Google account a user has connected. Tokens are stored encrypted at rest
+/// (see GoogleTokenCipher); this table never holds a plaintext credential.
+/// Nothing is written here until a real OAuth callback succeeds — there is no
+/// code path that fabricates a connected account.
+model GoogleAccount {
+  id             String    @id @default(uuid()) @db.Uuid
+  workspaceId    String    @map("workspace_id") @db.Uuid
+  userId         String    @unique @map("user_id") @db.Uuid
+  googleEmail    String    @map("google_email")
+  /// AES-256-GCM ciphertext, never the raw token.
+  accessTokenEnc String    @map("access_token_enc")
+  refreshTokenEnc String?  @map("refresh_token_enc")
+  expiresAt      DateTime  @map("expires_at")
+  scopes         String
+  /// Gmail's history cursor. Incremental sync asks for changes since this id
+  /// rather than re-listing the mailbox; null means a full sync is still owed.
+  gmailHistoryId String?   @map("gmail_history_id")
+  lastSyncedAt   DateTime? @map("last_synced_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  revokedAt      DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([workspaceId])
+  @@map("google_accounts")
+}
+
 model Email {
   id               String    @id @default(uuid()) @db.Uuid
+  /// True for rows produced by GOOGLE_INTEGRATION_MODE=sandbox. Sandbox rows
+  /// are visibly marked everywhere they surface so a demo can never be
+  /// mistaken for a live mailbox.
+  isSandbox        Boolean   @default(false) @map("is_sandbox")
   workspaceId      String    @map("workspace_id") @db.Uuid
   gmailMessageId   String    @unique @map("gmail_message_id")
   threadId         String    @map("thread_id")
@@ -1526,6 +1559,7 @@ model Email {
 
 model Meeting {
   id        String    @id @default(uuid()) @db.Uuid
+  isSandbox Boolean   @default(false) @map("is_sandbox")
   projectId String?   @map("project_id") @db.Uuid
   title     String
   startsAt  DateTime  @map("starts_at")

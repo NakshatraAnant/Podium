@@ -1,10 +1,33 @@
 # Integration Setup — Gmail, Google Calendar, Google Meet
 
-Status: **not built** (blueprint Phase 9). This document exists so a future
-session — or AMM Brands' own IT contact — knows exactly what to provide and
-what will be built against it, per the original brief's instruction to
-document activation requirements even when the integration itself is stubbed.
-Nothing in this repo currently calls any Google API.
+Status: **architecture and API surface built; every Google network call is
+blocked on credentials AMM Brands must supply** (blueprint Phase 9).
+
+What exists and runs today, verified by tests:
+
+- `google_accounts` table (OAuth tokens **encrypted at rest**, AES-256-GCM),
+  `emails` and `meetings` with an `is_sandbox` flag.
+- `GET/POST /api/integrations/google/{status,auth-url,callback,sync,emails}`
+  and `DELETE .../connection`.
+- A three-state mode switch (`GOOGLE_INTEGRATION_MODE`), and the sender ->
+  client/vendor/lead linking logic, which runs identically in sandbox and live
+  mode and is therefore genuinely exercised.
+
+What does **not** exist: any executed call to a Google API. `LiveGmailProvider`
+throws a clear error rather than shipping code that has never run against a
+real Workspace account. Nothing in this repo has ever completed an OAuth flow.
+
+## The three modes
+
+| `GOOGLE_INTEGRATION_MODE` | Behaviour |
+| --- | --- |
+| `disabled` (default) | Every Google endpoint returns **503** with the setup steps. Deliberately not an empty inbox, which would read as "no mail today". |
+| `sandbox` | Two obviously-synthetic messages from `@example.invalid`, stored with `is_sandbox = true`. No network call, no OAuth, and sending always refuses. |
+| `live` | Requires all three credentials below. If any is missing the app logs an error and **falls back to `disabled`** rather than failing later at the first API call. |
+
+There is no code path that writes a `google_accounts` row without a real token
+exchange having succeeded, and none that marks the integration connected in
+sandbox mode. A test asserts both.
 
 ## What we'll need from AMM Brands
 
@@ -77,10 +100,41 @@ calendar.
   pull, unless AMM confirms they have Gemini/Meet transcription entitlements
   worth building against.
 
-## Until this is built
+## Remaining work — exactly what is blocked on you
 
-The Mail and Meetings/Calendar screens in `docs/screens.md` are marked ⬜
-(stub) for exactly this reason. Do not fabricate a "sandbox mode" UI that
-pretends to sync — better to leave those nav items absent from the frontend
-than to ship a convincing-looking fake, per this build's general principle of
-not claiming more than what's verified.
+Everything below needs credentials for AMM Brands' real Google Workspace. Each
+item is a documented request shape in `apps/api/src/google/gmail.provider.ts`,
+not written blind and not tested, because it cannot be tested without an
+account to test against.
+
+1. **`LiveGmailProvider.fetchSince`** — full sync
+   (`users/me/messages?q=newer_than:30d` + batched metadata GETs) and
+   incremental sync (`users/me/history?startHistoryId=...`), including the
+   404-on-expired-history fallback to a full sync.
+2. **`LiveGmailProvider.send`** — `users/me/messages/send` with a base64url
+   RFC 2822 body, under `gmail.send`.
+3. **`users.watch()` + Pub/Sub push** so sync is event-driven rather than
+   polled. Needs a Pub/Sub topic in the same Google Cloud project.
+4. **Calendar / Meet** — `events.insert` with `conferenceDataVersion: 1` to get
+   a real Meet link into `meetings.meet_link`.
+
+### What I need from you to unblock these
+
+| Needed | Where it goes |
+| --- | --- |
+| OAuth Client ID | `GOOGLE_OAUTH_CLIENT_ID` |
+| OAuth Client Secret | `GOOGLE_OAUTH_CLIENT_SECRET` |
+| Authorized redirect URI registered in Google Cloud | `GOOGLE_OAUTH_REDIRECT_URI` |
+| A 32-byte secret for token encryption (production) | `GOOGLE_TOKEN_KEY` |
+| Confirmation that Gmail API + Calendar API are enabled on the project | — |
+
+Then set `GOOGLE_INTEGRATION_MODE=live`. Until all four are present the app
+will refuse to run in live mode, by design.
+
+### A note on Meet notes -> tasks (automation au9)
+
+Google Meet exposes no transcript or notes API without Workspace add-on
+entitlements AMM may not hold. `meetings.notes` is therefore a
+manually-entered field that a human promotes to tasks, not an automated
+transcript pull — unless you confirm AMM has Gemini/Meet transcription
+entitlements worth building against.
