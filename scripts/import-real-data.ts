@@ -160,11 +160,48 @@ function parseInt10(raw: string | null): number | null {
   return Number.isFinite(n) && n > 0 && n < 1_000_000 ? n : null;
 }
 
-function parseDate(raw: unknown): Date | null {
-  if (!raw) return null;
-  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
-  const d = new Date(String(raw));
-  return Number.isNaN(d.getTime()) ? null : d;
+const MONTHS: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+};
+
+/**
+ * Event dates, parsed strictly — an explicit 4-digit year is REQUIRED.
+ *
+ * `new Date(string)` cannot be used here. AMM writes multi-day events as
+ * ranges ("17-18 Jan 2027", "9-12 July"), and JavaScript reads the leading
+ * "17-18" as a year-month pair, silently discarding the real year: it turns
+ * "17-18 Jan 2027" into 2018-01-17. That produced 88 wrong-but-plausible event
+ * dates attached to real client names in the first import — worse than no date
+ * at all, because nothing about them looks fake.
+ *
+ * So: Excel's own date cells are trusted; a string is parsed only when day,
+ * month and an explicit year are all present, resolving a range to its first
+ * day; and anything else yields null rather than a guessed year. The original
+ * text is always kept in `eventDateText` so a human can resolve "9-12 July"
+ * later — the information is preserved, just not promoted to a real date.
+ */
+function parseEventDate(raw: unknown): { date: Date | null; text: string | null } {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return { date: null, text: null };
+  if (raw instanceof Date) {
+    return Number.isNaN(raw.getTime()) ? { date: null, text: null } : { date: raw, text: null };
+  }
+  const text = String(raw).trim();
+  const t = text.toLowerCase().replace(/(\d+)(st|nd|rd|th)/g, "$1");
+
+  const year = t.match(/\b(20\d{2})\b/);
+  if (!year) return { date: null, text };
+  const month = Object.keys(MONTHS).find((m) => new RegExp(`\\b${m}`).test(t));
+  if (month === undefined) return { date: null, text };
+
+  // The day is the last 1-2 digit number before the month name ("23rd-24th
+  // July 2026" -> 23), falling back to the first in the string.
+  const beforeMonth = t.split(new RegExp(`\\b${month}`))[0];
+  const day = (beforeMonth.match(/\b(\d{1,2})\b/) ?? t.match(/\b(\d{1,2})\b/) ?? [])[1];
+  if (!day) return { date: null, text };
+
+  const d = new Date(Date.UTC(Number(year[1]), MONTHS[month], Number(day)));
+  return Number.isNaN(d.getTime()) ? { date: null, text } : { date: d, text };
 }
 
 /**
@@ -705,6 +742,7 @@ async function importPipeline(
        * as the flag the header promises, and anything longer is kept as the
        * requirement notes it actually is rather than being thrown away.
        */
+      const eventDate = parseEventDate(row[idx.date]);
       const currentCell = cell(row, idx.current);
       const isYesNo = currentCell !== null && /^[yn]$/i.test(currentCell);
       const isCurrentClient = isYesNo && /^y$/i.test(currentCell!);
@@ -728,7 +766,8 @@ async function importPipeline(
           locationText,
           eventType: [cell(row, idx.eventType), cell(row, idx.service)].filter(Boolean).join(" — ") || null,
           pax: parseInt10(cell(row, idx.pax)),
-          eventDate: parseDate(row[idx.date]),
+          eventDate: eventDate.date,
+          eventDateText: eventDate.text,
           remarks:
             [
               cell(row, idx.remarks),
@@ -770,6 +809,7 @@ async function importPipeline(
     if (!name && !phone) continue;
     rawRows++;
     const locationText = cell(row, aIdx.location);
+    const apiDate = parseEventDate(row[aIdx.date]);
     consider(
       phone,
       {
@@ -777,7 +817,7 @@ async function importPipeline(
         stage: "LEAD", kind: "PIPELINE" as const, value: null,
         cityId: matchCity(locationText), locationText,
         eventType: cell(row, aIdx.eventType), pax: parseInt10(cell(row, aIdx.pax)),
-        eventDate: parseDate(row[aIdx.date]), remarks: null,
+        eventDate: apiDate.date, eventDateText: apiDate.text, remarks: null,
         source: "API query", sourceSheet: api.name, sourceFile: "Elixir_New_Clients_Query.xlsx",
         intakeDetail: leftovers(api.header, row, new Set(Object.values(aIdx).filter((i) => i >= 0))) as any,
       },
@@ -894,13 +934,14 @@ async function importFormResponses(
     if (phone && seen.has(phone)) continue;
     if (phone) seen.add(phone);
     const locationText = cell(row, idx.location);
+    const formDate = parseEventDate(row[idx.date]);
     created.push({
       id: randomUUID(), workspaceId: wsId, name: name ?? phone!, contactName: name,
       phone, phoneRaw, email: cell(row, idx.email),
       stage: "LEAD", kind: "PIPELINE" as const, value: null,
       cityId: matchCity(locationText), locationText,
       eventType: cell(row, idx.eventType), pax: parseInt10(cell(row, idx.pax)),
-      eventDate: parseDate(row[idx.date]), remarks: null,
+      eventDate: formDate.date, eventDateText: formDate.text, remarks: null,
       source: "Elixir intake form", sourceSheet: sheet.name, sourceFile: "Elixir_New_Clients_Query.xlsx",
       intakeDetail: detail as any,
     });

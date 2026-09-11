@@ -24,6 +24,10 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  // A separate, disposable database Prisma drops and recreates when diffing
+  // migrations. Declaring it here means no migration command can ever be
+  // handed the real database by accident from the command line.
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
 }
 
 // =========================================================================
@@ -163,6 +167,9 @@ enum PurchaseOrderStatus {
   SENT
   PARTIALLY_RECEIVED
   RECEIVED
+  // Terminal: no further receipts accepted. Distinct from RECEIVED, which
+  // means "every ordered line arrived" — a PO can be closed short.
+  CLOSED
   CANCELLED
 }
 
@@ -297,6 +304,9 @@ model Workspace {
   id        String    @id @default(uuid()) @db.Uuid
   name      String
   gstin     String?
+  /// Purchase requests at or above this value need an approval before a PO can
+  /// be raised. Configurable per workspace rather than hardcoded.
+  procurementApprovalThreshold Decimal @default(50000) @map("procurement_approval_threshold") @db.Decimal(14, 2)
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
@@ -609,6 +619,10 @@ model Lead {
   eventType   String?   @map("event_type")
   pax         Int?
   eventDate   DateTime? @map("event_date")
+  /// The date exactly as the sheet wrote it, kept whenever it could not be
+  /// parsed into a real date without guessing — "9-12 July" (no year),
+  /// "Nov end". A human can resolve these; the importer must not.
+  eventDateText String? @map("event_date_text")
   remarks     String?
   /// Richer intake-form answers (bar size, services, prop display, ...).
   intakeDetail Json?    @map("intake_detail")
@@ -953,6 +967,7 @@ model InventoryItem {
   workspace       Workspace              @relation(fields: [workspaceId], references: [id])
   preferredVendor Vendor?                @relation(fields: [preferredVendorId], references: [id])
   balances        InventoryBalance[]
+  purchaseOrderItems PurchaseOrderItem[]
   movements       InventoryMovement[]
   reservations    InventoryReservation[]
   recipeItems     RecipeItem[]
@@ -976,6 +991,7 @@ model InventoryLocation {
 
   @@unique([cityId, name])
   @@map("inventory_locations")
+  goodsReceipts     GoodsReceipt[]
 }
 
 /// Derived-only. Never written to directly — recomputed from
@@ -1082,6 +1098,8 @@ model PurchaseRequest {
   vendorId  String                @map("vendor_id") @db.Uuid
   amount    Decimal               @db.Decimal(14, 2)
   status    PurchaseRequestStatus @default(QUOTE_COMPARISON)
+  notes     String?
+  requestedById String?           @map("requested_by") @db.Uuid
   createdAt DateTime              @default(now()) @map("created_at")
   updatedAt DateTime              @updatedAt @map("updated_at")
   createdById String?             @map("created_by") @db.Uuid
@@ -1090,6 +1108,7 @@ model PurchaseRequest {
   project        Project?        @relation(fields: [projectId], references: [id])
   vendor         Vendor          @relation(fields: [vendorId], references: [id])
   purchaseOrders PurchaseOrder[]
+  approvals      Approval[]
 
   @@index([status])
   @@map("purchase_requests")
@@ -1107,21 +1126,44 @@ model PurchaseOrder {
   createdById   String?             @map("created_by") @db.Uuid
   deletedAt     DateTime?           @map("deleted_at")
 
-  purchaseRequest PurchaseRequest @relation(fields: [prId], references: [id])
-  vendor          Vendor          @relation(fields: [vendorId], references: [id])
+  purchaseRequest PurchaseRequest     @relation(fields: [prId], references: [id])
+  vendor          Vendor              @relation(fields: [vendorId], references: [id])
   goodsReceipts   GoodsReceipt[]
+  items           PurchaseOrderItem[]
 
   @@map("purchase_orders")
+}
+
+/// What was actually ordered, per SKU. Without this a "partial receipt" has
+/// nothing to be partial against, and a goods receipt has no way to know which
+/// inventory item to move or at what cost.
+model PurchaseOrderItem {
+  id          String  @id @default(uuid()) @db.Uuid
+  poId        String  @map("po_id") @db.Uuid
+  skuId       String  @map("sku_id") @db.Uuid
+  qtyOrdered  Int     @map("qty_ordered")
+  unitPrice   Decimal @map("unit_price") @db.Decimal(12, 2)
+
+  purchaseOrder PurchaseOrder @relation(fields: [poId], references: [id])
+  sku           InventoryItem @relation(fields: [skuId], references: [id])
+
+  @@unique([poId, skuId])
+  @@map("purchase_order_items")
 }
 
 model GoodsReceipt {
   id           String   @id @default(uuid()) @db.Uuid
   poId         String   @map("po_id") @db.Uuid
   receivedQty  Json     @map("received_qty") // partial-receipt aware: {skuId: qty, ...}
+  /// Which warehouse the goods physically landed in. Required: a RECEIVE
+  /// movement with no destination cannot be reconciled against a balance.
+  locationId   String   @map("location_id") @db.Uuid
+  note         String?
   receivedAt   DateTime @default(now()) @map("received_at")
   receivedById String   @map("received_by") @db.Uuid
 
-  purchaseOrder PurchaseOrder @relation(fields: [poId], references: [id])
+  purchaseOrder PurchaseOrder     @relation(fields: [poId], references: [id])
+  location      InventoryLocation @relation(fields: [locationId], references: [id])
 
   @@map("goods_receipts")
 }
@@ -1342,7 +1384,10 @@ model Risk {
 
 model Approval {
   id            String         @id @default(uuid()) @db.Uuid
-  projectId     String         @map("project_id") @db.Uuid
+  /// Nullable because a store-replenishment purchase request has no project,
+  /// but still has to pass the same approval gate as a project purchase.
+  projectId     String?        @map("project_id") @db.Uuid
+  purchaseRequestId String?    @map("purchase_request_id") @db.Uuid
   title         String
   type          ApprovalType
   requesterId   String         @map("requester_id") @db.Uuid
@@ -1355,9 +1400,11 @@ model Approval {
   updatedAt     DateTime       @updatedAt @map("updated_at")
   deletedAt     DateTime?      @map("deleted_at")
 
-  project Project @relation(fields: [projectId], references: [id])
+  project         Project?         @relation(fields: [projectId], references: [id])
+  purchaseRequest PurchaseRequest? @relation(fields: [purchaseRequestId], references: [id])
 
   @@index([projectId, status])
+  @@index([purchaseRequestId])
   @@map("approvals")
 }
 

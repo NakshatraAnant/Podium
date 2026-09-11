@@ -18,6 +18,8 @@ import { FlowsModule } from "./flows/flows.module";
 import { GovernanceModule } from "./governance/governance.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { InvoicesModule } from "./invoices/invoices.module";
+import { EventDayModule } from "./eventday/eventday.module";
+import { ProcurementModule } from "./procurement/procurement.module";
 import { ProjectsModule } from "./projects/projects.module";
 import { TasksModule } from "./tasks/tasks.module";
 import { UsersModule } from "./users/users.module";
@@ -36,6 +38,8 @@ import { VendorsModule } from "./vendors/vendors.module";
     CitiesModule,
     ClientsModule,
     CrmModule,
+    EventDayModule,
+    ProcurementModule,
     ProjectsModule,
     TasksModule,
     FlowsModule,

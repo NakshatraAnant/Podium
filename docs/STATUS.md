@@ -9,6 +9,114 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-1 Real projects and invoices: what the data actually supports (2026-09-11)
+
+**No `projects` and no `invoices` rows were created. Zero of AMM's imported
+records contain enough real information to justify one**, and every field that
+would be needed to invent one — event date, city, deal value, booked status —
+is exactly the kind of plausible-looking fabrication that would be
+indistinguishable from real data once attached to a real client name.
+
+### The 415 phone-cross-referenced leads: 0 eligible
+
+| Field required for a project | How many of the 415 have it |
+| --- | --- |
+| linked to a real client | 415 |
+| a real event date | **0** |
+| a real city | **0** |
+| a deal value | **0** |
+| **all of the above (project-eligible)** | **0** |
+
+The reason is structural, not a parsing failure: 412 of the 415 come from
+`ARCHIT PHONE DATABASE`, and the other 3 from `TRADE SHOWS DATABASE`,
+`IBG circle` and `IBG BARTENDER DATABASE`. All four are cold prospecting
+sheets whose only columns are name, phone and sometimes e-mail. The link
+proves *this phone belongs to someone who is already a client* — it says
+nothing about any specific event. Widening the net to "any lead at all with a
+client link, a real event date, a real city and Won status" also returns **0**.
+
+### The 43 near-misses — these need real input from Anant
+
+These pipeline leads have a real event date, a real city, and usually a real
+guest count and event type. They are **not** projects because they are
+enquiries: none is linked to a client record, none is marked Won, and none
+carries a value. To turn any of them into a real project, Anant needs to
+confirm three things per row: **did this event actually get booked, what was
+the agreed value, and which existing client (or new client) does it belong
+to?** Nothing else is missing.
+
+| Contact | Event date | City | Stage | Pax | Event type |
+| --- | --- | --- | --- | --- | --- |
+| Ashirwad | 2025-12-10 | Delhi | LEAD | 100 | Private Party |
+| Khush Arora | 2025-12-10 | Jaipur | LEAD | 250 | Destination Wedding |
+| Saleem Khan | 2026-01-12 | Jaipur | LEAD | 150 | Destination Wedding |
+| Nikhil Sharma | 2026-02-19 | Delhi | LEAD | 100 | Private Party |
+| Pranav | 2026-02-24 | Delhi | LEAD | 450 | Destination Wedding |
+| Mahipal singh | 2026-03-06 | Udaipur | LEAD | 150 | Destination Wedding |
+| Gaurav | 2026-03-08 | Delhi | LEAD | 350 | Destination Wedding |
+| Sanya | 2026-03-08 | Delhi | LEAD | ? | Private Party |
+| Rk | 2026-04-16 | Mumbai | LEAD | 150 | Private Party |
+| Nabin Dhami | 2026-04-23 | Delhi | LEAD | 50 | Private Party |
+| Manjunath | 2026-05-17 | Bengaluru | LEAD | 350 | Destination Wedding |
+| Sumeet | 2026-05-24 | Jaipur | LEAD | 400 | Destination Wedding |
+| Geet Chopra | 2026-06-26 | Delhi | PROPOSAL | 100 | Pre-wedding function — BAR |
+| Gopal | 2026-06-27 | Jaipur | LEAD | 400 | Destination Wedding — BAR |
+| Milan | 2026-06-28 | Delhi | LEAD | 150 | marriage anniversary |
+| Saket Bansal | 2026-07-10 | Udaipur | PROPOSAL | ? | Chai Lelo, Elixir |
+| Saket Bansal | 2026-07-10 | Udaipur | PROPOSAL | ? | Chai Lelo, Elixir |
+| Krishnakant | 2026-07-25 | Jaipur | LEAD | ? | Haldi, Mehndi, Sangeet, Baraat |
+| Sharon | 2026-08-22 | Delhi | PROPOSAL | 50 | private house party — bar |
+| Arpan Aggarwal | 2026-09-05 | Udaipur | LEAD | 300 | Destination Wedding — BAR |
+| Vandana | 2026-11-15 | Udaipur | PROPOSAL | 200 | wedding — Chai |
+| Ranjit | 2026-11-15 | Delhi | PROPOSAL | 700 | Private Party — BAR |
+| Jatin | 2026-11-20 | Delhi | PROPOSAL | ? | mehndi, wedding — BAR |
+| NO NAME | 2026-11-20 | Delhi | LEAD | ? | Bartending — BAR |
+| Devin | 2026-11-25 | Delhi | LEAD | 150 | Destination Wedding — BAR |
+| Hemant | 2026-11-26 | Jaipur | LEAD | 250 | wedding — Chai |
+| SIMRAN AHUJA | 2026-11-27 | Delhi | PROPOSAL | 400 | Wedding and Cocktail — BAR |
+| UDISH MEHTA | 2026-12-01 | Delhi | LEAD | 150 | Cocktail — BAR |
+| PRAMOD AGRAWAL | 2026-12-01 | Jaipur | PROPOSAL | 400 | Wedding — CHAI LOUNGE |
+| bhsrti | 2026-12-03 | Delhi | PROPOSAL | 400 | Destination Wedding — bar |
+| Taapsi Sanskar | 2026-12-11 | Jaipur | PROPOSAL | ? | Chai Lelo |
+| Taapsi Sanskar | 2026-12-11 | Jaipur | PROPOSAL | ? | Chai Lelo |
+| Royal Darbar | 2026-12-18 | Mumbai | LEAD | 200 | wedding — Chai |
+| Saurav Gupta | 2027-01-01 | Jaipur | PROPOSAL | ? | — |
+| SHADAB NOOR | 2027-01-09 | Delhi | LEAD | 800 | Wedding Reception — CHAI LOUNGE |
+| Rajesh Ahuja | 2027-01-14 | Udaipur | LEAD | 150 | Destination Wedding — CHAI |
+| MOHIT & AISHWARYA | 2027-01-15 | Goa | PROPOSAL | ? | 15th - Welcome Drinks - 100 pax / 15th - |
+| MOHIT & AISHWARYA | 2027-01-15 | Goa | PROPOSAL | ? | 15th - Welcome Drinks - 100 pax / 15th - |
+| NA | 2027-01-16 | Delhi | PROPOSAL | 6 | Wedding — Bar |
+| NA | 2027-01-16 | Delhi | PROPOSAL | 6 | Wedding — Bar |
+| Perfexion events | 2027-01-17 | Jaipur | PROPOSAL | 200 | 17th Jan - Carnival / 17th Jan - Cocktai |
+| Perfexion events | 2027-01-17 | Jaipur | PROPOSAL | 200 | 17th Jan - Carnival / 17th Jan - Cocktai |
+| VK | 2027-01-17 | Jaipur | LEAD | 150 | wedding — Chai |
+
+### One source data-entry error, imported faithfully
+
+`Elixir Form Response` has a row for "Rudra das" with an Excel event start
+date of 2007-02-05 and an end date of 2006-01-05 — the end before the start,
+and both ~20 years before the pipeline it sits in. It is imported exactly as
+written rather than corrected or dropped, and it is excluded from every
+eligibility count above by the `>= 2024-01-01` filter.
+
+### A real bug this phase found and fixed in the previous import
+
+The first import used `new Date(string)` for the pipeline `Date` column. AMM
+writes multi-day events as ranges, and JavaScript parses the leading `"17-18"`
+of `"17-18 Jan 2027"` as a year-month pair, **silently discarding the real
+year and returning 2018-01-17**. That produced **88 wrong-but-plausible event
+dates attached to real client names** — precisely the failure mode that is
+more dangerous than obvious demo data, because nothing about it looks fake.
+
+`parseEventDate()` now requires an explicit 4-digit year before it will
+produce a date, resolves a range to its first day, and otherwise returns null
+while preserving the original string in the new `leads.event_date_text`
+column. Result after re-import, verified by query: **171 real dates (all
+between 2025-12-10 and 2027-05-17 apart from the one source error above), 164
+unparseable strings kept as text rather than guessed** (`"13th & 14th Dec"`,
+`"31st Oct- 1st Nov"`, `"Date?"`). Those 164 are recoverable by a human; they
+were not recoverable when they were silently wrong.
+
 ## 0.0 Real-data import — 2026-09-11
 
 `scripts/import-real-data.ts` (run with `pnpm import:real-data`) replaces

@@ -27,9 +27,23 @@ export class ApprovalsService {
   }
 
   async decide(user: RequestUser, id: string, input: DecideApprovalInput) {
-    const approval = await this.prisma.client.approval.findFirst({ where: { id, deletedAt: null }, include: { project: true } });
-    if (!approval || approval.project.workspaceId !== user.workspaceId) throw new NotFoundException("Approval not found.");
-    this.cityScope.assertCanAccessCity(user, approval.project.cityId);
+    const approval = await this.prisma.client.approval.findFirst({
+      where: { id, deletedAt: null },
+      include: { project: true, purchaseRequest: true },
+    });
+    if (!approval) throw new NotFoundException("Approval not found.");
+
+    // An approval hangs off either a project or a purchase request — the latter
+    // because store-replenishment purchases have no project but must still pass
+    // the gate. Whichever it is, the city grant is checked, never skipped.
+    if (approval.project) {
+      if (approval.project.workspaceId !== user.workspaceId) throw new NotFoundException("Approval not found.");
+      this.cityScope.assertCanAccessCity(user, approval.project.cityId);
+    } else if (approval.purchaseRequest) {
+      this.cityScope.assertCanAccessCity(user, approval.purchaseRequest.cityId);
+    } else {
+      throw new NotFoundException("Approval not found.");
+    }
     return this.prisma.client.approval.update({
       where: { id: approval.id },
       data: { status: input.decision, decisionReason: input.reason, decidedAt: new Date() },

@@ -11,6 +11,8 @@ services:
       - "5432:5432"
     volumes:
       - podium_pg_data:/var/lib/postgresql/data
+      # Creates podium_shadow on first boot -- see SHADOW_DATABASE_URL in .env.example
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U podium -d podium_dev"]
       interval: 5s

@@ -129,6 +129,45 @@ export class InventoryService {
   }
 
   /**
+   * The single supported way for another module to write to the ledger.
+   * Procurement's goods receipts call this inside their own transaction, so a
+   * received PO line and its RECEIVE movement and the balance change are one
+   * atomic unit — and so there is exactly one implementation of the row-locked
+   * balance update, not a second copy that could drift from this one.
+   */
+  async recordMovementInTx(
+    tx: Tx,
+    params: {
+      skuId: string;
+      type: "RECEIVE" | "PURCHASE" | "RETURN" | "CONSUME" | "DAMAGE" | "ADJUSTMENT";
+      locationId: string;
+      qty: number;
+      actorId: string;
+      refType?: string;
+      refId?: string;
+      note?: string;
+      idempotencyKey?: string;
+    },
+  ) {
+    const decrement = DECREMENTS_FROM.has(params.type);
+    await this.applyBalanceDelta(tx, params.skuId, params.locationId, decrement ? -params.qty : params.qty);
+    return tx.inventoryMovement.create({
+      data: {
+        skuId: params.skuId,
+        type: params.type,
+        fromLocationId: decrement ? params.locationId : null,
+        toLocationId: decrement ? null : params.locationId,
+        qty: params.qty,
+        refType: params.refType,
+        refId: params.refId,
+        actorId: params.actorId,
+        note: params.note,
+        idempotencyKey: params.idempotencyKey,
+      },
+    });
+  }
+
+  /**
    * Row-locks the (sku, location) balance and applies `delta`, creating the
    * balance row first (qty 0) if this is the first movement ever recorded
    * for that pair. Throws if a decrement would take on-hand stock negative —
