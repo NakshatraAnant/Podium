@@ -134,3 +134,40 @@ export interface CityOptionDto {
   code: string;
   gstStateCode: string;
 }
+
+// ------------------------------------------------------- budgets & expenses
+export interface ExpenseDto {
+  id: string;
+  category: string;
+  amount: string | number;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "REIMBURSED";
+  note: string | null;
+  incurredAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  project: { id: string; name: string };
+  user: { id: string; name: string };
+  approvedBy: { id: string; name: string } | null;
+}
+
+export interface BudgetVarianceDto {
+  projectId: string;
+  hasBudget: boolean;
+  lines: Array<{
+    category: string;
+    plannedAmount: number;
+    actualAmount: number;
+    variance: number;
+    variancePct: number | null;
+  }>;
+  unbudgetedSpend: Array<{ category: string; actualAmount: number }>;
+  /** Purchase orders carry no category, so this is never split across lines. */
+  purchaseOrderSpend: number;
+  totals: { planned: number; actualExpenses: number; actualAllCommitted: number; variance: number };
+}
+
+export interface BudgetDto {
+  id: string;
+  projectId: string;
+  lines: Array<{ id: string; category: string; plannedAmount: string | number }>;
+}

@@ -2,6 +2,7 @@ import { Controller, Get, Query } from "@nestjs/common";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { RequirePermissions } from "../common/decorators/require-permissions.decorator";
 import type { RequestUser } from "../common/types";
+import { BudgetsService } from "../finance/budgets.service";
 import { ReportsService, type Scope } from "./reports.service";
 
 /**
@@ -11,7 +12,10 @@ import { ReportsService, type Scope } from "./reports.service";
  */
 @Controller("reports")
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly budgets: BudgetsService,
+  ) {}
 
   @Get("pnl")
   @RequirePermissions("projects:view")
@@ -41,6 +45,18 @@ export class ReportsController {
     @Query("cityId") cityId?: string,
   ) {
     return this.reports.cashFlow(user, from, to, cityId);
+  }
+
+  /**
+   * Budget vs. actual for one project (Phase B). Lives under /reports as
+   * well as /budgets/variance because this is the figure the P&L screen
+   * shows alongside revenue — same service method, so the two can never
+   * disagree. Planned is a plan; every actual is a committed transaction.
+   */
+  @Get("budget-variance")
+  @RequirePermissions("budgets:view")
+  budgetVariance(@CurrentUser() user: RequestUser, @Query("projectId") projectId: string) {
+    return this.budgets.variance(user, projectId);
   }
 
   /** Clearly and separately labelled — see ReportsService.forecast. */

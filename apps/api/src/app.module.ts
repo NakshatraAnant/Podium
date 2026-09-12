@@ -16,6 +16,7 @@ import { PermissionsGuard } from "./common/guards/permissions.guard";
 import { AuditInterceptor } from "./common/interceptors/audit.interceptor";
 import { MailModule } from "./common/mail/mail.module";
 import { PrismaModule } from "./common/prisma/prisma.module";
+import { FinanceModule } from "./finance/finance.module";
 import { FlowsModule } from "./flows/flows.module";
 import { GovernanceModule } from "./governance/governance.module";
 import { InventoryModule } from "./inventory/inventory.module";
@@ -51,6 +52,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     ProjectsModule,
     ReportsModule,
     TasksModule,
+    FinanceModule,
     FlowsModule,
     GovernanceModule,
     InventoryModule,

@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { AppShell } from "../../../components/AppShell";
+import { BudgetPanel } from "../../../components/BudgetPanel";
 import { FlowCanvas } from "../../../components/FlowCanvas";
 import { StatusPill } from "../../../components/StatusPill";
 import { api } from "../../../lib/api";
@@ -29,7 +30,7 @@ interface ProjectDetail {
   flowInstances: Array<{ id: string; name: string; status: string; steps: Array<{ id: string; key: string; name: string; status: string; ownerId: string; role: string }> }>;
 }
 
-const TABS = ["overview", "tasks", "flows", "risks", "team"] as const;
+const TABS = ["overview", "tasks", "flows", "budget", "risks", "team"] as const;
 
 export default function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
@@ -160,6 +161,8 @@ export default function ProjectDetailPage() {
           ))}
         </div>
       )}
+
+      {tab === "budget" && <BudgetPanel projectId={p.id} />}
 
       {tab === "risks" && (
         <div className="panel">

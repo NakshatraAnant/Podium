@@ -432,6 +432,7 @@ model User {
   tasksOwned         Task[]            @relation("TaskOwner")
   flowStepsOwned     FlowStep[]        @relation("FlowStepOwner")
   expenses           Expense[]
+  expensesApproved   Expense[]         @relation("ExpenseApprover")
   leavesRequested    Leave[]
   attendance         Attendance?
   notifications      Notification[]
@@ -1234,6 +1235,8 @@ model Budget {
   id        String    @id @default(uuid()) @db.Uuid
   projectId String    @map("project_id") @db.Uuid
   createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  createdById String? @map("created_by") @db.Uuid
   deletedAt DateTime? @map("deleted_at")
 
   project Project      @relation(fields: [projectId], references: [id])
@@ -1255,6 +1258,10 @@ model BudgetLine {
 
 model Expense {
   id        String        @id @default(uuid()) @db.Uuid
+  /// The claimant — the person who spent the money and is owed it back.
+  /// Deliberately distinct from `approvedById`: an expense claim approved by
+  /// its own claimant is the textbook reimbursement-fraud path, so
+  /// ExpensesService refuses it.
   userId    String        @map("user_id") @db.Uuid
   projectId String        @map("project_id") @db.Uuid
   category  String
@@ -1262,14 +1269,25 @@ model Expense {
   status    ExpenseStatus @default(PENDING)
   note      String?
   incurredAt DateTime     @default(now()) @map("incurred_at")
+  /// Who decided, when, and why — an approval workflow that moves real money
+  /// without recording its approver is not an audit trail.
+  approvedById   String?   @map("approved_by") @db.Uuid
+  decidedAt      DateTime? @map("decided_at")
+  decisionReason String?   @map("decision_reason")
+  reimbursedAt   DateTime? @map("reimbursed_at")
+  /// Financial record — idempotent creation, same header pattern as invoices,
+  /// payments and inventory movements (blueprint §30).
+  idempotencyKey String?   @unique @map("idempotency_key")
   createdAt DateTime      @default(now()) @map("created_at")
   updatedAt DateTime      @updatedAt @map("updated_at")
   deletedAt DateTime?     @map("deleted_at")
 
-  user    User    @relation(fields: [userId], references: [id])
-  project Project @relation(fields: [projectId], references: [id])
+  user       User    @relation(fields: [userId], references: [id])
+  approvedBy User?   @relation("ExpenseApprover", fields: [approvedById], references: [id])
+  project    Project @relation(fields: [projectId], references: [id])
 
   @@index([userId, status])
+  @@index([projectId, status])
   @@map("expenses")
 }
 

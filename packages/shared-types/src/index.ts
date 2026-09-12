@@ -7,6 +7,7 @@ export * from "./procurement";
 export * from "./projects";
 export * from "./tasks";
 export * from "./eventday";
+export * from "./finance";
 export * from "./flows";
 export * from "./governance";
 export * from "./inventory";
