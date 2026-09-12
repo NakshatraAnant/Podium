@@ -9,6 +9,185 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-4 PHASE B.1 — BUG-009 fix, open decision writeup, test re-runnability (2026-09-12)
+
+A short, contained phase inserted between Phase B and Phase C at explicit
+instruction, correcting two items Phase B's own report surfaced rather than
+carrying them forward as debt.
+
+### BUG-009: self-approval and re-deciding on the generic approvals path
+
+`ApprovalsService.decide()` — the `/approvals/:id/decide` path used by the
+`/approvals` screen for CREATIVE/BUDGET/CLIENT/VENDOR/PAYMENT-type
+approvals — updated its row unconditionally: no check that it was still
+PENDING (a settled approval could be silently re-decided) and no check that
+the decider wasn't the original requester. This is the same defect class
+Phase B's `ExpensesService.decide()` was built to avoid on a different
+table, and it sits on a real-money path (these approvals gate spend), so it
+was brought in scope ahead of Phase C rather than left open.
+
+**Checked for dependents before changing behaviour**, per instruction:
+`ApprovalsService.decide()` has exactly one caller
+(`GovernanceController.decide`), no other backend code calls it, and no
+existing test exercised it (confirmed by search) — so there was nothing
+relying on the old unguarded re-decide behaviour. This is a *distinct* code
+path from `ProcurementService.decideRequestApproval()` (used for PURCHASE-
+type approvals raised via `/purchase-requests`), which already carried both
+guards from an earlier audit cycle — verified by reading it, and its
+existing test (`procurement.e2e-spec.ts`, "the requester cannot approve
+their own request") still passes unchanged.
+
+Fixed with the same pattern as expenses: PENDING-only (409 on a settled
+approval), self-approval blocked in the service regardless of role (403),
+the status guard repeated in the `UPDATE ... WHERE status = 'PENDING'`
+clause so two simultaneous deciders can't both win, and the decision
+audited inside the same transaction (the controller's now-redundant
+`@Audit()` was removed to avoid a second, thinner row for the same event —
+the same call made for expenses in Phase B).
+
+New file `apps/api/test/approvals.e2e-spec.ts`, 4 tests, all passing:
+self-approval refused (row unchanged, `decidedAt` stays null); a different
+user approves (audit row records the real actor); re-deciding a settled
+APPROVED approval refused (409, status unchanged); re-deciding a settled
+REJECTED approval also refused (not just the APPROVED case).
+
+**Verified live against `podium_dev`**, real HTTP, not just the test
+suite: Anant creates an approval, Anant is refused deciding it
+(`403 FORBIDDEN — You requested this approval, so you cannot decide it
+yourself`), Neha approves it, Neha's attempt to re-decide is refused
+(`409 CONFLICT — This approval is already APPROVED — a settled approval
+cannot be decided again`), and the audit trail shows exactly one
+`approval.create` and one `approval.approved` row (no duplicate from the
+removed controller-level `@Audit()`). `podium_prod` holds zero `approvals`
+rows today (no schema migration was needed for this fix — it's pure service
+logic — so there is nothing for a migration to have touched); confirmed
+before and after.
+
+### OPEN DECISION — Finance / clients:view
+
+**What Finance can and cannot do today.** The seeded RBAC matrix grants the
+Finance role every action (`view/create/edit/delete/approve/export`) on
+`invoices`, `payments`, `budgets`, `expenses`, `reports`, plus
+`approvals:approve`, `approvals:view`, and `projects:view`. It grants
+**nothing** on `clients` — not even `clients:view`. Concretely: a Finance
+user can create and issue an invoice against a project (which carries its
+own `clientId`), but `GET /clients` returns `403 FORBIDDEN` for them, so any
+screen that needs a client picker independent of a project (an invoice
+create form built around "pick a client, then a project" rather than "pick
+a project, get its client for free") cannot be shown to Finance without
+either changing the RBAC matrix or changing the screen. Phase A's invoice
+form was built around the second option (see below); this is the resulting,
+still-open first option.
+
+**Why this wasn't just resolved outright.** It's a real RBAC-scope
+decision, not an implementation detail — the two options change what a
+Finance user can see, permanently, across the whole app, not just on the
+invoice form:
+
+- **Option 1 — leave Finance without `clients:view`, keep screens
+  client-blind for that role.** This is what Phase A actually shipped: the
+  invoice create form selects a *project* and reads the client off it
+  (`GET /projects` already includes the client on every row), so Finance
+  never needs a standalone client list. Cost: any *future* screen that
+  needs to show or search clients independent of a project — a client
+  ledger, a "which clients haven't been invoiced this quarter" report — hits
+  the exact same wall and needs the same workaround, or a decision to grant
+  the permission at that point instead.
+- **Option 2 — grant Finance `clients:view` (read-only).** One line in
+  `packages/db/prisma/seed.ts`'s `ROLE_GRANTS` table. Simpler for every
+  future finance-adjacent screen, and arguably correct on its face — a
+  Finance Manager plausibly should be able to look up a client's billing
+  details. Cost: it's a permanent widening of what the Finance role can see,
+  made as a side effect of one form's convenience rather than a deliberate
+  RBAC decision — exactly the kind of unilateral scope change Part 2's
+  operating principles ask to be avoided. It also doesn't by itself decide
+  whether Finance should get `clients:edit` or `clients:export` too, which
+  a real "can Finance see client data" policy would need to answer at the
+  same time.
+- **Option 3 (not costed in Phase A, worth naming) — a narrower
+  `clients:view:billing`-style permission** exposing only the fields an
+  invoice/finance screen needs (name, GSTIN, billing address, state code)
+  rather than the full client record (segment, LTV, source, owner). More
+  correct in principle, more work to build (a new permission plus a
+  narrower read path), and not something to add speculatively without a
+  second screen that actually needs it.
+
+**Recommendation** (not a decision made unilaterally): keep Option 1 for
+now — it costs nothing today and Phase A already ships it — and revisit
+Option 2 only when a second screen genuinely needs client data independent
+of a project. Granting a permission "just in case" is the kind of
+speculative RBAC widening the project's own standing principles argue
+against; waiting for a second real use case turns this into a decision with
+actual evidence behind it instead of a guess.
+
+### Test-suite re-runnability
+
+`flow-sla.e2e-spec.ts` and `automation.e2e-spec.ts` RULE 2/RULE 3 were
+fragile in a way that only ever shows up on a *second* run against a
+persistent database — CI is unaffected because it always starts fresh —
+and it was left as a known footgun in the Phase B report rather than fixed.
+Root cause, found by re-running the suite deliberately without reseeding
+and reading the failure precisely instead of guessing: **both files count
+rows globally (by `projectId`, or by an entity id whose history is never
+cleared) rather than scoping to the specific row their own test created.**
+Three compounding causes, all real:
+
+1. `flow-sla.e2e-spec.ts` creates a real flow instance under the shared
+   "Rathi" project in every test and never cleaned any of them up. Each
+   step's SLA is 15 minutes; a leftover instance from an hour-old run has
+   long since bred past its own SLA in real wall-clock time, and the very
+   next `POST /flows/sla-check` call — from this file or any other —
+   sweeps it up too, raising an *extra* risk against the same project.
+   `expect(risksAfter).toBe(risksBefore + 1)` then sees more than one new
+   risk and fails.
+2. `automation.e2e-spec.ts`'s own `beforeAll` unconditionally wipes
+   `automationRun` — the automation engine's *only* idempotency ledger
+   (`ruleId, triggeredBy, triggerHash`) — so its other assertions can start
+   from a clean run log. That also erases the engine's memory of having
+   already flagged the low-stock balance or escalated a licence on a prior
+   run; `audit_logs` and `notifications` are never wiped, so a stale flag
+   from an earlier run was still sitting there, and the exact-count
+   assertion (`.toBe(1)`) on RULE 2 counted it.
+3. RULE 3's licence-escalation risk count had the identical shared-project
+   count-delta shape as flow-sla's, on the very same "Rathi" project (it's
+   deterministically the first project in the workspace) — not yet observed
+   failing, but the same defect, latent.
+
+**Fix, in both files:** replaced every project-wide/entity-history count
+with an assertion scoped to the specific row the test itself created —
+walking from the audit log's own `after.raisedRiskId` / `after.riskId` to
+the exact risk raised for *this* step or *this* licence, rather than
+counting how many risks exist on the project at all. `flow-sla.e2e-spec.ts`
+additionally now tracks every flow instance it creates and deletes it (and
+its steps, step-runs, dependencies, the risk/notification/audit rows tied
+to any escalation) in `afterAll`, so nothing is left for a future run to
+self-breach and sweep up. `automation.e2e-spec.ts`'s `beforeAll` gained a
+scoped cleanup — the low-stock balance's own stale audit/notification rows,
+and any leftover test licences (with their audit/notification/risk trail)
+— run once before its tests, so the file's own required `automationRun`
+wipe no longer leaves debris behind for the *next* run to trip over.
+
+Both fixes are scoped deletes of exactly what these tests create/touch —
+never a blanket wipe of `audit_logs`, `notifications`, or `risks`.
+
+**Verified by actually running it**, not inferring it: full suite against a
+freshly-seeded `podium_test` — **140/140 passed**. Immediately re-run,
+*same database, no reseed* — **140/140 passed**. Run a third time for
+margin — **140/140 passed**. (Phase B's own report is corrected here too:
+it attributed the original flow-sla failure to in-process cron
+double-firing, which was a guess stated too confidently — the real cause
+was this leftover-data class of bug, as the investigation above shows.)
+
+**Known residual, out of this task's stated scope:** `flow-engine.e2e-spec.ts`
+creates several flow instances against the same shared "Rathi" project and
+also never cleans them up. It doesn't itself assert on any global count (so
+it isn't broken by this), and the two files fixed above no longer care
+what's left lying around on that project — but its leftover instances will
+keep accumulating in the test database across runs indefinitely. Noted
+rather than fixed, since it isn't causing a failure and enlarging this
+"small, contained" phase to cover a third file's general hygiene wasn't
+asked for.
+
 ## 0.-3 CTO audit remediation — 2026-09-12 (in progress)
 
 An independent CTO audit found nine numbered bugs (BUG-001 through BUG-009)

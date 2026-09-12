@@ -35,6 +35,40 @@ describe("Automation engine runtime (e2e)", () => {
     cityId = (await prisma.city.findFirstOrThrow({ where: { code: "JPR" } })).id;
     noPmCityId = (await prisma.city.findFirstOrThrow({ where: { code: "DEL" } })).id;
     await prisma.automationRun.deleteMany({});
+
+    /**
+     * Re-runnability (Phase B.1). automationRun is the engine's ONLY
+     * idempotency ledger (ruleId, triggeredBy, triggerHash) — wiping it
+     * above so this file's own SUCCESS/BLOCKED assertions start clean also
+     * makes the engine forget it already flagged the low-stock balance or
+     * escalated a licence on a PRIOR run of this suite. audit_logs and
+     * notifications are never deleted, so without this a stale flag from an
+     * earlier run sits here and inflates today's counts (this is exactly
+     * what made RULE 2's exact-count assertion below fail on a second
+     * consecutive run without a database reseed). Scoped to precisely the
+     * rows this file's own tests create — never a blanket wipe.
+     */
+    const staleBalance = await prisma.inventoryBalance.findFirst({});
+    if (staleBalance) {
+      await prisma.auditLog.deleteMany({ where: { action: "automation.low_stock_flagged", entityId: staleBalance.id } });
+      await prisma.notification.deleteMany({ where: { sourceType: "inventory_balance", sourceId: staleBalance.id } });
+    }
+    const staleLicences = await prisma.licence.findMany({
+      where: { workspaceId, type: { in: ["Excise — event bar (test)", "Already approved (test)"] } },
+    });
+    if (staleLicences.length > 0) {
+      const staleIds = staleLicences.map((l) => l.id);
+      const staleAudits = await prisma.auditLog.findMany({
+        where: { entityType: "licence", entityId: { in: staleIds }, action: "automation.licence_escalated" },
+      });
+      const staleRiskIds = staleAudits
+        .map((a) => (a.after as { riskId?: string } | null)?.riskId)
+        .filter((rid): rid is string => Boolean(rid));
+      if (staleRiskIds.length > 0) await prisma.risk.deleteMany({ where: { id: { in: staleRiskIds } } });
+      await prisma.notification.deleteMany({ where: { sourceType: "licence", sourceId: { in: staleIds } } });
+      await prisma.auditLog.deleteMany({ where: { entityType: "licence", entityId: { in: staleIds } } });
+      await prisma.licence.deleteMany({ where: { id: { in: staleIds } } });
+    }
   });
   afterAll(async () => await app.close());
 
@@ -196,12 +230,27 @@ describe("Automation engine runtime (e2e)", () => {
         escalationOffsetDays: 7,
       },
     });
-    const risksBefore = await prisma.risk.count({ where: { projectId: project.id } });
-
     const res = await post("/api/automation/sweep", founder);
     expect(res.body.licences).toBeGreaterThanOrEqual(1);
 
-    expect(await prisma.risk.count({ where: { projectId: project.id } })).toBe(risksBefore + 1);
+    // Scoped to the specific risk this licence raised (via the audit row's
+    // after.riskId), not a before/after count of every risk on the shared
+    // "first project" — a count delta here would be thrown off by any other
+    // risk-raising activity against that same project, from this file or
+    // another spec entirely (see the flow-sla fix in this same phase for the
+    // identical class of bug on the same shared project).
+    const escalationAudit = await prisma.auditLog.findFirst({
+      where: { action: "automation.licence_escalated", entityId: licence.id },
+    });
+    expect(escalationAudit).not.toBeNull();
+    const raisedRiskId = (escalationAudit!.after as { riskId?: string } | null)?.riskId;
+    expect(raisedRiskId).toBeTruthy();
+    const raisedRisk = await prisma.risk.findUnique({ where: { id: raisedRiskId! } });
+    expect(raisedRisk).not.toBeNull();
+    expect(raisedRisk!.projectId).toBe(project.id);
+    expect(raisedRisk!.severity).toBe("HIGH");
+    expect(raisedRisk!.status).toBe("OPEN");
+
     const run = await prisma.automationRun.findFirst({ where: { triggeredBy: licence.id } });
     expect(run?.status).toBe("SUCCESS");
     expect(await prisma.auditLog.count({ where: { action: "automation.licence_escalated", entityId: licence.id } })).toBe(1);

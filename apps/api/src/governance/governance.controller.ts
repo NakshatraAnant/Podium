@@ -58,9 +58,13 @@ export class ApprovalsController {
     return this.approvals.create(user, body);
   }
 
+  /**
+   * Audited inside the service transaction (Phase B.1) — see
+   * ApprovalsService.decide() for why a second @Audit() row here would only
+   * duplicate that one.
+   */
   @Post(":id/decide")
   @RequirePermissions("approvals:approve")
-  @Audit("approval", "approval.decide")
   decide(@CurrentUser() user: RequestUser, @Param("id") id: string, @Body(new ZodValidationPipe(decideApprovalSchema)) body: ReturnType<typeof decideApprovalSchema.parse>) {
     return this.approvals.decide(user, id, body);
   }
