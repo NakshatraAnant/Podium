@@ -210,3 +210,116 @@ export interface ForecastDto {
   explanation: string;
   series: Array<{ month: string; seasonalityIndex: number; projectedNetRevenue: number }>;
 }
+
+// -------------------------------------------------------------- procurement
+export interface VendorOptionDto {
+  id: string;
+  name: string;
+  category: string;
+  status: string;
+}
+
+export interface InventoryBalanceDto {
+  item: { id: string; sku: string; name: string; unit: string; standardCost: string | number };
+  location: { id: string; name: string; city: { id: string; name: string } };
+  qtyOnHand: number;
+  reorderLevel: number;
+}
+
+export interface ApprovalRefDto {
+  id: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  requesterId: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+}
+
+export interface PurchaseOrderRefDto {
+  id: string;
+  status: string;
+  total: string | number;
+}
+
+export interface PurchaseRequestDto {
+  id: string;
+  item: string;
+  vendorId: string;
+  vendor: { id: string; name: string };
+  projectId: string | null;
+  project: { id: string; name: string } | null;
+  cityId: string | null;
+  amount: string | number;
+  status: string;
+  notes: string | null;
+  requestedById: string | null;
+  approvals: ApprovalRefDto[];
+  purchaseOrders: PurchaseOrderRefDto[];
+  createdAt: string;
+}
+
+export interface PurchaseOrderItemDto {
+  id: string;
+  skuId: string;
+  qtyOrdered: number;
+  unitPrice: string | number;
+  sku: { id: string; sku: string; name: string; unit: string };
+}
+
+export interface GoodsReceiptDto {
+  id: string;
+  receivedQty: Record<string, number>;
+  locationId: string;
+  note: string | null;
+  receivedAt: string;
+  receivedById: string;
+}
+
+export interface PurchaseOrderDto {
+  id: string;
+  prId: string;
+  vendorId: string;
+  vendor: { id: string; name: string };
+  total: string | number;
+  status: string;
+  items: PurchaseOrderItemDto[];
+  goodsReceipts: GoodsReceiptDto[];
+  purchaseRequest: { id: string; item: string; cityId: string | null };
+  createdAt: string;
+}
+
+// --------------------------------------------------------------- event day
+export interface RunsheetItemDto {
+  id: string;
+  scheduledTime: string;
+  text: string;
+  ownerId: string;
+  doneAt: string | null;
+  sortOrder: number;
+}
+
+export interface RunsheetDto {
+  id?: string;
+  projectId: string;
+  items: RunsheetItemDto[];
+}
+
+export interface CheckinDto {
+  id: string;
+  projectId: string;
+  userId: string;
+  /** Resolved server-side (BUG-011) — the checker-in need not be a project member. */
+  userName: string;
+  checkedInAt: string;
+}
+
+export interface IncidentDto {
+  id: string;
+  projectId: string;
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  text: string;
+  reportedById: string;
+  /** Resolved server-side (BUG-011) — the reporter need not be a project member. */
+  reportedByName: string;
+  raisedRiskId: string | null;
+  createdAt: string;
+}

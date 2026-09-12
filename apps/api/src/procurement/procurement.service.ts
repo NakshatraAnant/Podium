@@ -224,6 +224,33 @@ export class ProcurementService {
     // total is never trusted (prompt §7).
     const total = input.items.reduce((sum, i) => sum + i.qtyOrdered * i.unitPrice, 0);
 
+    /**
+     * BUG-008 (found while building the Phase D procurement UI, fixed as
+     * Phase D.1): a PO's total was never checked against the amount its
+     * request was actually approved for. The approval gate above only ever
+     * looked at the PR's own estimated `amount` at request time — nothing
+     * stopped a ₹50,001 request from clearing approval and then raising a
+     * ₹5,00,000 PO once real vendor quotes came in during quote comparison,
+     * which defeats the entire point of a value-based approval threshold.
+     *
+     * Only requests that actually went through the approval gate are
+     * constrained here — a below-threshold request was never given an
+     * approved ceiling to begin with, and quote comparison legitimately
+     * settling on a different (including higher) figure than the original
+     * estimate is the normal, intended path for those. No tolerance band is
+     * applied: the audit's own wording is a hard cap at the approved amount,
+     * and inventing a fudge factor would be a bigger, undocumented policy
+     * call this fix isn't meant to make.
+     */
+    const wasApproved = pr.approvals.some((a) => a.status === "APPROVED");
+    if (wasApproved && total > Number(pr.amount)) {
+      throw new BadRequestException(
+        `This purchase order totals ₹${total.toLocaleString("en-IN")} but the request was only approved for ` +
+          `₹${Number(pr.amount).toLocaleString("en-IN")}. Raise a new purchase request for the higher amount so ` +
+          "it can go through approval again — an approved ceiling cannot be exceeded by a later PO.",
+      );
+    }
+
     return this.prisma.client.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.create({
         data: {
@@ -291,7 +318,11 @@ export class ProcurementService {
     const scope = this.cityScope.scopeFilter(user, cityId);
     return this.prisma.client.purchaseOrder.findMany({
       where: { deletedAt: null, vendor: { workspaceId: user.workspaceId }, purchaseRequest: { ...scope } },
-      include: { vendor: true, items: true, goodsReceipts: true },
+      // BUG-010 (2026-09-12, found building Phase D frontend against this
+      // endpoint): the list view shows each order's originating request
+      // (item name), same as getOrder() below — omitting this relation left
+      // every consumer of this list crashing on `po.purchaseRequest.item`.
+      include: { vendor: true, items: true, goodsReceipts: true, purchaseRequest: true },
       orderBy: { createdAt: "desc" },
       take: 200,
     });

@@ -9,6 +9,174 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-5 PHASE D — Procurement + Event Day frontend (2026-09-12)
+
+Both backends (procurement: PR→approval→PO→GRN; event day: runsheet/
+check-ins/incidents) existed with no UI. Built the full frontend surface
+for both, following the exact patterns already established in Phases A-C
+(TanStack Query, server-computed totals only, RBAC enforced server-side
+with the client never hiding an action solely on a permission it can't see).
+
+**New frontend, procurement:** `/procurement` (Requests/Orders tabs),
+`/procurement/requests/new` (create form; vendor picker excludes
+BLACKLISTED), `/procurement/requests/[id]` (approve/reject panel,
+"raise purchase order" gated on `QUOTE_COMPARISON` status with a live
+client-side ceiling warning mirroring the server's BUG-008 check),
+`/procurement/orders/[id]` (send/close/cancel, partial goods receipt with
+per-SKU outstanding-quantity tracking, goods-receipt history).
+
+**New frontend, event day:** a new "Event day" tab on the project detail
+page (`components/EventDayPanel.tsx`) with Runsheet / Check-ins / Incidents
+sub-tabs — create-runsheet, add-cue, tick-cue; self/other check-in; log
+incident with a live "this auto-raises a risk" notice for HIGH/CRITICAL.
+The people picker (runsheet cue owners, "check someone else in") is
+deliberately the project's own roster (PM + members from the existing
+project detail endpoint) — there is no general list-users endpoint in this
+workspace, and event-day operations are inherently project-scoped, so this
+is the correct source rather than a new endpoint built just for a picker.
+
+### Phase D.1 — BUG-008: a PO could exceed its request's approved ceiling
+
+Found earlier, while first reading `procurement.service.ts` to build the
+frontend against it (before the live-verification pass below): approval
+clears at the *request's* estimated amount, but nothing then checked the
+resulting purchase order's server-computed total against that ceiling — a
+PO could legitimately be raised for an arbitrarily larger sum once real
+vendor quotes came in. Fixed in `ProcurementService.createOrder()`: for a
+request that went through approval, the PO total is now capped at the
+approved amount (400 with a clear message if exceeded); a below-threshold
+request that never needed approval is deliberately left unconstrained,
+since quote comparison legitimately settling on a different figure is the
+normal path for those. Two tests added to `procurement.e2e-spec.ts`
+covering both the capped and uncapped cases; full suite run twice
+consecutively against `podium_test` (14/14 both times) and verified live
+against `podium_dev` before this session's continuation began.
+
+### Phase D.2 — BUG-010: purchase order list dropped its own foreign key
+
+Found live-verifying the Orders tab in a real browser: `GET
+/purchase-orders` crashed the frontend with "Cannot read properties of
+undefined (reading 'item')". `ProcurementService.listOrders()`'s Prisma
+`include` was `{ vendor, items, goodsReceipts }` — missing `purchaseRequest`,
+which `getOrder()` (the single-order endpoint) already included. Every
+order in the list had no originating request attached, and the list view
+(reasonably) assumes one is always present.
+
+Fix: added `purchaseRequest: true` to `listOrders()`'s include — the exact
+relation `getOrder()` already uses two lines below it in the same file.
+Added `apps/api/test/procurement.e2e-spec.ts`: "BUG-010: the purchase order
+list includes each order's originating request" — creates a PR+PO, fetches
+the list, and asserts the specific row (found by id, not position) carries
+`purchaseRequest.item`. Full procurement suite (14 tests) run twice
+consecutively against `podium_test` with no reseed: 14/14 both times.
+Verified live against `podium_dev` in a real Chromium browser via
+Playwright — before the fix, the Orders tab was a blank white screen with a
+`Cannot read properties of undefined` console error; after, it renders the
+full list correctly (screenshot taken).
+
+### Phase D.3 — BUG-011: check-ins and incidents had no name to show
+
+Found in the same live-verification pass: a HIGH incident logged by Anant
+Sharma (Founder, not a member of the test project) displayed "Reported by:
+Unknown" instead of his name, and his own check-in showed the same. Root
+cause: `event_day_checkins.user_id` and `event_day_incidents.reported_by`
+are plain UUID columns with no Prisma relation to `User` (unlike, say,
+`runsheets.project_id`), so `listCheckins()`/`listIncidents()` returned bare
+ids. My first frontend draft tried to paper over this by resolving names
+from the project's own roster — which fails for exactly the case that
+matters most: someone outside the roster (a Founder, an Admin) acting on
+the project, which `checkIn()` and `createIncident()` both explicitly
+permit.
+
+Fix, scoped to these two read paths only (no schema migration — adding a
+real relation would be the more invasive option for a display-only gap):
+a batched id→name lookup (`EventDayService.namesFor()`), the same pattern
+already used by this file's own `assertUsersExist()`, attaching
+`userName`/`reportedByName` to each row. Frontend now reads the
+server-supplied name directly instead of the roster lookup.
+
+Added two tests to `apps/api/test/eventday.e2e-spec.ts`: "BUG-011: the
+check-in list resolves a real display name for each checker-in" and
+"...for the reporter" — both assert against the real user's name fetched
+independently in `beforeAll`, not a hardcoded string. Full eventday suite
+(13 tests) run twice consecutively against `podium_test` with no reseed:
+13/13 both times. Verified live against `podium_dev`: before the fix,
+"Anant Sharma" showed as "Unknown" in both the check-in list and the
+incident log; after, both show his real name (screenshots taken).
+
+### What you actually ran
+
+- `pnpm --filter @podium/web exec tsc --noEmit` — clean (exit 0) after all
+  new/edited procurement and event-day frontend files.
+- `pnpm --filter @podium/api exec tsc --noEmit` — clean (exit 0) after the
+  BUG-010/BUG-011 backend fixes.
+- Full e2e suite (`NODE_ENV=test jest --config test/jest-e2e.json`, no path
+  filter): 17 suites / 145 tests, run twice consecutively against
+  `podium_test` with no reseed between runs — 145/145 both times.
+- Live verification: started the API against `podium_dev` (not the default
+  `.env`, which points at `podium_prod` — overrode `DATABASE_URL` explicitly)
+  and the Next.js dev server, then drove a real Chromium browser via
+  Playwright end-to-end: create PR (₹65,000, above the ₹50,000 approval
+  threshold) → approve as a different user (Founder) → raise a PO within
+  the approved ceiling → send → partially receive goods → create a runsheet
+  → add a cue → tick a cue → self-check-in → log a HIGH incident and
+  confirm the risk-raised indicator. Screenshots taken at each step
+  (`/tmp/.../scratchpad/0*.png` through `19-incident-escalated.png`).
+- Cleaned up the ~10 duplicate "Phase D Playwright verification" purchase
+  requests/orders created across repeated debug runs from `podium_dev`
+  (FK-ordered delete, in a transaction). Left the runsheet/check-in/incident
+  rows created on the demo "Cognizant Annual Day 2026" project in place —
+  these are legitimate single instances of real feature usage on disposable
+  dev data, not accumulating test noise, consistent with how other seeded
+  demo activity already sits in `podium_dev`.
+- Re-checked `podium_prod` after all of the above: 52,024 clients / 15
+  users / 0 projects / 0 purchase_requests / 0 invoices — unchanged. No
+  migration was needed for either fix (both are query/service-layer only).
+
+### What's still not done
+
+- Event-day people picker is scoped to the project roster by design (see
+  above) — this means the "check someone else in" and cue-owner dropdowns
+  cannot select someone outside the project's PM/members, even though the
+  underlying API permits it for anyone holding `projects:edit`. This is a
+  deliberate, documented scope limit, not an oversight.
+- No Playwright coverage was added as a persisted test suite — verification
+  was a one-off scripted browser session (`scratchpad/phase-d-e2e.js`),
+  consistent with how Phases A-C were verified, not a new CI-tracked UI test
+  layer. Real correctness coverage is the e2e API test suites above.
+- Purchase order cancellation/close and the goods-receipt-complete →
+  `GOODS_RECEIVED` transition were exercised only indirectly (through the
+  existing procurement e2e suite, not through a fresh Phase D-specific UI
+  test) — the UI code path was visually verified for send + partial-receive
+  only.
+
+### Assumptions / judgment calls
+
+- **BUG-010 and BUG-011 fixes were applied directly, not deferred as OPEN
+  DECISIONs** — both are the "self-correcting sub-phase" case (Part A of
+  the standing rule): a live, reproducible defect in already-shipped code,
+  fixed narrowly with a pattern already proven elsewhere in the same file,
+  with a real e2e test, verified live. Neither is destructive or
+  irreversible; both are additive (an included relation, a batched lookup).
+- Chose to fix BUG-011 with a service-layer lookup rather than adding a
+  proper Prisma relation from `event_day_checkins`/`event_day_incidents` to
+  `User` — a schema migration is more invasive for what is currently a
+  display-only gap, and the lookup pattern was already sitting right there
+  in the same file. If a future phase needs to join through these
+  relations for something beyond display (e.g. a report), that's the
+  trigger to revisit this as a real migration instead.
+
+### Known issues
+
+- None found beyond BUG-010/BUG-011, both fixed above.
+
+### Next step
+
+Continuing directly into Phase E (Playbooks CRUD + Deal-Won wiring, menu
+costing) per the standing instruction to proceed through Phases E-I in one
+continuous pass, applying the same self-correcting sub-phase pattern to any
+further live defects found along the way.
+
 ## 0.-4 PHASE B.1 — BUG-009 fix, open decision writeup, test re-runnability (2026-09-12)
 
 A short, contained phase inserted between Phase B and Phase C at explicit

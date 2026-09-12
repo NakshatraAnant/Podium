@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import { AppShell } from "../../../components/AppShell";
 import { BudgetPanel } from "../../../components/BudgetPanel";
+import { EventDayPanel } from "../../../components/EventDayPanel";
 import { FlowCanvas } from "../../../components/FlowCanvas";
 import { StatusPill } from "../../../components/StatusPill";
 import { api } from "../../../lib/api";
@@ -30,7 +31,7 @@ interface ProjectDetail {
   flowInstances: Array<{ id: string; name: string; status: string; steps: Array<{ id: string; key: string; name: string; status: string; ownerId: string; role: string }> }>;
 }
 
-const TABS = ["overview", "tasks", "flows", "budget", "risks", "team"] as const;
+const TABS = ["overview", "tasks", "flows", "budget", "event day", "risks", "team"] as const;
 
 export default function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
@@ -163,6 +164,15 @@ export default function ProjectDetailPage() {
       )}
 
       {tab === "budget" && <BudgetPanel projectId={p.id} />}
+
+      {tab === "event day" && (
+        <EventDayPanel
+          projectId={p.id}
+          people={[p.pm, ...p.members.map((m) => m.user)].filter(
+            (person, i, arr) => arr.findIndex((x) => x.id === person.id) === i,
+          )}
+        />
+      )}
 
       {tab === "risks" && (
         <div className="panel">

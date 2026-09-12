@@ -128,11 +128,18 @@ export class EventDayService {
 
   async listCheckins(user: RequestUser, projectId: string) {
     const project = await this.loadProject(user, projectId);
-    return this.prisma.client.eventDayCheckin.findMany({
+    const checkins = await this.prisma.client.eventDayCheckin.findMany({
       where: { projectId: project.id },
-      include: { },
       orderBy: { checkedInAt: "asc" },
     });
+    // BUG-011 (2026-09-12, found building Phase D frontend): userId has no
+    // Prisma relation to User (event_day_checkins predates it needing one),
+    // so a checker-in outside the project's own roster — e.g. a Founder
+    // checking themselves in on a project they aren't a member of, which
+    // checkIn() explicitly allows — had no name to display. Same fix
+    // pattern as assertUsersExist() below: a single batched lookup.
+    const names = await this.namesFor(checkins.map((c) => c.userId));
+    return checkins.map((c) => ({ ...c, userName: names.get(c.userId) ?? "Unknown" }));
   }
 
   /**
@@ -170,10 +177,13 @@ export class EventDayService {
 
   async listIncidents(user: RequestUser, projectId: string) {
     const project = await this.loadProject(user, projectId);
-    return this.prisma.client.eventDayIncident.findMany({
+    const incidents = await this.prisma.client.eventDayIncident.findMany({
       where: { projectId: project.id },
       orderBy: { createdAt: "desc" },
     });
+    // BUG-011: see listCheckins() above — reportedById has the same gap.
+    const names = await this.namesFor(incidents.map((i) => i.reportedById));
+    return incidents.map((i) => ({ ...i, reportedByName: names.get(i.reportedById) ?? "Unknown" }));
   }
 
   /**
@@ -263,6 +273,14 @@ export class EventDayService {
     if (!runsheet || runsheet.project.workspaceId !== user.workspaceId) throw new NotFoundException("Runsheet not found.");
     this.cityScope.assertCanAccessCity(user, runsheet.project.cityId);
     return runsheet;
+  }
+
+  /** Batched id->name lookup for BUG-011 (see listCheckins/listIncidents above). */
+  private async namesFor(ids: string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return new Map();
+    const users = await this.prisma.client.user.findMany({ where: { id: { in: unique } }, select: { id: true, name: true } });
+    return new Map(users.map((u) => [u.id, u.name]));
   }
 
   private async assertUsersExist(user: RequestUser, ids: string[]) {

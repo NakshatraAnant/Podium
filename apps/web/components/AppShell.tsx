@@ -24,7 +24,10 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
   },
   {
     label: "Bar & stock",
-    items: [{ href: "/inventory", icon: "▣", label: "Inventory" }],
+    items: [
+      { href: "/inventory", icon: "▣", label: "Inventory" },
+      { href: "/procurement", icon: "⛁", label: "Procurement" },
+    ],
   },
   {
     label: "Revenue & money",

@@ -19,6 +19,7 @@ describe("Event Day (e2e)", () => {
   let projectId: string;
   let pmId: string;
   let opsId: string;
+  let opsName: string;
 
   beforeAll(async () => {
     app = await bootstrapTestApp();
@@ -31,6 +32,7 @@ describe("Event Day (e2e)", () => {
     // An Operations user in the same city, so city scope isn't what's under test.
     const ops = await prisma.user.findFirstOrThrow({ where: { email: "lakshya.chouhan@ammbrands.in" } }); // Ops, Udaipur
     opsId = ops.id;
+    opsName = ops.name;
     opsToken = await loginAs(app, ops.email);
 
     await prisma.runsheetItem.deleteMany({ where: { runsheet: { projectId } } });
@@ -97,6 +99,22 @@ describe("Event Day (e2e)", () => {
     expect(await prisma.eventDayCheckin.count({ where: { projectId, userId: opsId } })).toBe(1);
   });
 
+  /**
+   * BUG-011 (Phase D.3). Found building the Phase D frontend: userId/
+   * reportedById on check-ins and incidents have no Prisma relation to User
+   * (unlike, say, runsheet items' project relation), so the list endpoints
+   * returned bare ids with no name attached — every list view had to guess a
+   * display name from a project roster that the reporting/checking-in user
+   * need not even belong to.
+   */
+  it("BUG-011: the check-in list resolves a real display name for each checker-in", async () => {
+    const res = await get(`/api/projects/${projectId}/checkins`, opsToken);
+    expect(res.status).toBe(200);
+    const row = res.body.find((c: { userId: string }) => c.userId === opsId);
+    expect(row).toBeDefined();
+    expect(row.userName).toBe(opsName);
+  });
+
   it("a PM (projects:edit) can check a colleague in; a non-manager cannot check someone else in", async () => {
     const byPm = await post(`/api/projects/${projectId}/checkins`, pmToken, { userId: pmId });
     expect(byPm.status).toBe(201);
@@ -153,6 +171,14 @@ describe("Event Day (e2e)", () => {
     const audit = await prisma.auditLog.findFirst({ where: { entityId: incident.id, action: "event_day.incident_logged" } });
     expect(audit).not.toBeNull();
     expect(audit!.actorId).toBe(opsId);
+  });
+
+  it("BUG-011: the incident list resolves a real display name for the reporter", async () => {
+    const res = await get(`/api/projects/${projectId}/incidents`, opsToken);
+    expect(res.status).toBe(200);
+    const row = res.body.find((i: { text: string }) => i.text === "Guest injured by broken glassware at the main bar");
+    expect(row).toBeDefined();
+    expect(row.reportedByName).toBe(opsName);
   });
 
   it("a CRITICAL incident escalates at CRITICAL severity", async () => {
