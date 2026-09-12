@@ -8,6 +8,8 @@ export interface RequestUser {
   roleNames: string[];
   /** null cityId + scope ALL means "every city in the workspace" (blueprint §10) */
   cityAccess: Array<{ cityId: string | null; scope: "READ" | "WRITE" | "ALL" }>;
+  /** BUG-003: read by MustChangePasswordGuard, which blocks every other route while true. */
+  mustChangePassword: boolean;
 }
 
 export function hasAllCityAccess(user: RequestUser): boolean {

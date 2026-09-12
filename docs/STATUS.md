@@ -131,6 +131,79 @@ freelancers, 12,750 leads, 0 projects, 0 invoices, 15 users. Nothing was
 deleted; the only unresolved discrepancy against the §1.10 baseline is
 exactly those 330 rows.
 
+### §1.3 BUG-003 — password lifecycle (API + tests DONE; real-account reset
+NOT done — needs a decision)
+
+Every account previously shared one published password with no way to
+change it, no lockout, and no onboarding path. Built, on real endpoints,
+against `podium_test`, with a dedicated 7-test e2e file
+(`apps/api/test/auth-password.e2e-spec.ts`, all passing):
+
+- **`POST /auth/change-password`** — requires the current password,
+  bcrypt-verified; on success, revokes every other active refresh token for
+  that user (a password change should invalidate every other session) and
+  writes an `auth.password_changed` audit row.
+- **Lockout** — 5 failed logins locks the account for 15 minutes
+  (`User.failedLoginAttempts`/`lockedUntil`); a successful login resets the
+  counter. These two numbers are a documented default for an internal ops
+  tool, not something the audit specified — easy to move to config if AMM
+  wants stricter/looser.
+- **Forced change on first login** — `User.mustChangePassword`. This is
+  enforced server-side, not just as a frontend hint: a new
+  `MustChangePasswordGuard` (registered globally, right after JWT auth)
+  blocks *every* other authenticated route for such a user except
+  `/auth/change-password` and `/users/me` (`@SkipMustChangePassword()`).
+  The login response's `mustChangePassword` flag is only there so the
+  frontend can jump straight to the right screen — the guard is the actual
+  boundary.
+- **Invite-based onboarding** — a new `PasswordInvite` table holds a
+  SHA-256 hash of a one-time token (same pattern as `RefreshToken`).
+  `POST /users/:id/invite` (requires `people:edit`) issues one and returns
+  the raw token/URL directly in the response body. `POST
+  /auth/accept-invite` consumes it (single-use, time-limited) and logs the
+  user in.
+
+**What's genuinely unresolved, and needs your decision before I call
+BUG-003 closed:**
+
+1. **How does an invited/reset user actually receive their link?** There is
+   no live email integration in this build (Gmail integration is entirely
+   blocked on Google credentials AMM hasn't supplied — see Phase 9 below —
+   and even once live, it's for linking inbound mail to CRM records, not a
+   generic "send transactional email" capability). `POST /users/:id/invite`
+   currently does the mechanically safe part — issues the token — and
+   hands the raw URL back in the API response for whoever called it to
+   deliver by hand. That's a real gap for a rollout to 15 real employees,
+   not a finished onboarding flow. Options, roughly in order of effort:
+   - **(a) Manual distribution.** An admin calls the invite endpoint per
+     person and sends the link themselves (WhatsApp, Slack, however AMM
+     already reaches staff). Zero extra build, works today, but is a
+     one-by-one manual step for every one of the 15 people.
+   - **(b) A real transactional email sender.** Wire up SMTP or a
+     provider (SendGrid, Postmark, AWS SES) so `createPasswordInvite`
+     actually emails the link. Needs credentials from you and a modest
+     amount of new code (a mail service, a template); more durable for
+     ongoing onboarding as staff turns over.
+   - **(c) Skip tokens/links for the initial rollout**: an admin endpoint
+     that directly sets a new temporary password for an existing user
+     (still forcing `mustChangePassword`) and reads it out to them,
+     bypassing the token/URL step entirely for this one-time reset. Less
+     secure than a link (the password transits some out-of-band channel
+     either way, so this doesn't really avoid the problem) but is the
+     least new code.
+
+   None of these is silently assumed — building the wrong one wastes real
+   effort and, worse, could lock 15 people out of a live system.
+
+2. **Resetting every existing real account's password** (the audit's
+   explicit ask) is deliberately **not done yet**, because it depends on
+   the answer to (1): the shared password stops working the moment it's
+   reset, and until there's an agreed way for each of the 15 real users to
+   receive their new credential, resetting it now would lock everyone out
+   of the live system with no recovery path. The mechanism to do the reset
+   (issue every user a `PasswordInvite`, set `mustChangePassword: true`,
+   null out the shared `passwordHash`) is a few lines once (1) is decided.
+
 ## 0.-2 Phases 4, 5, 8-12 — 2026-09-11 (second build session)
 
 Everything below was verified by running it: real requests against the real

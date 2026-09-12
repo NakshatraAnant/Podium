@@ -28,7 +28,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     api
-      .get<{ id: string; name: string; email: string; roles: string[]; cityAccess: CurrentUser["cityAccess"] }>("/users/me")
+      .get<{
+        id: string;
+        name: string;
+        email: string;
+        roles: string[];
+        cityAccess: CurrentUser["cityAccess"];
+        mustChangePassword: boolean;
+      }>("/users/me")
       .then((me) => setUser(me))
       .catch(() => clearTokens())
       .finally(() => setLoading(false));

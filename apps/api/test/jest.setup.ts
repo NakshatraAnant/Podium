@@ -26,10 +26,15 @@ if (!dbName.endsWith("_test")) {
   );
 }
 
+// The shadow database is legitimately named "..._test_shadow" (Prisma's own
+// migrate-diff tooling appends "_shadow"), so the check is "_test appears as
+// a real name segment", not "the name ends with _test" — that stricter check
+// rejected every valid shadow database name and silently blocked the entire
+// suite from running at all until this was caught.
 const shadowUrl = process.env.SHADOW_DATABASE_URL ?? "";
 const shadowDbName = shadowUrl.split("/").pop()?.split("?")[0] ?? "";
-if (shadowUrl && !shadowDbName.endsWith("_test")) {
+if (shadowUrl && !/(^|_)test(_|$)/.test(shadowDbName)) {
   throw new Error(
-    `Refusing to run tests: SHADOW_DATABASE_URL resolves to database "${shadowDbName}", whose name does not end "_test".`,
+    `Refusing to run tests: SHADOW_DATABASE_URL resolves to database "${shadowDbName}", which doesn't look like a test database.`,
   );
 }

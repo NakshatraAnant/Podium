@@ -57,6 +57,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       permissions,
       roleNames,
       cityAccess: user.cityAccess.map((c) => ({ cityId: c.cityId, scope: c.scope })),
+      mustChangePassword: user.mustChangePassword,
     };
   }
 }
