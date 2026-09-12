@@ -14,6 +14,7 @@ import { JwtAuthGuard } from "./common/guards/jwt-auth.guard";
 import { MustChangePasswordGuard } from "./common/guards/must-change-password.guard";
 import { PermissionsGuard } from "./common/guards/permissions.guard";
 import { AuditInterceptor } from "./common/interceptors/audit.interceptor";
+import { MailModule } from "./common/mail/mail.module";
 import { PrismaModule } from "./common/prisma/prisma.module";
 import { FlowsModule } from "./flows/flows.module";
 import { GovernanceModule } from "./governance/governance.module";
@@ -36,6 +37,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     ThrottlerModule.forRoot({ throttlers: [{ ttl: 60_000, limit: 120 }] }),
     PrismaModule,
     CommonModule,
+    MailModule,
     AuthModule,
     ChatModule,
     UsersModule,

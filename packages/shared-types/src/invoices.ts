@@ -32,3 +32,8 @@ export const createAdjustmentNoteSchema = z.object({
   reason: z.string().min(1),
 });
 export type CreateAdjustmentNoteInput = z.infer<typeof createAdjustmentNoteSchema>;
+
+export const cancelInvoiceSchema = z.object({
+  reason: z.string().min(1).optional(),
+});
+export type CancelInvoiceInput = z.infer<typeof cancelInvoiceSchema>;

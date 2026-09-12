@@ -23,11 +23,12 @@
     "import:real-data": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-real-data.ts"
   },
   "devDependencies": {
-    "typescript": "^5.5.4",
+    "@prisma/client": "^5.22.0",
+    "@types/node": "^20.16.10",
+    "playwright": "^1.63.0",
     "prettier": "^3.3.3",
     "ts-node": "^10.9.2",
-    "xlsx": "^0.18.5",
-    "@types/node": "^20.16.10",
-    "@prisma/client": "^5.22.0"
+    "typescript": "^5.5.4",
+    "xlsx": "^0.18.5"
   }
 }

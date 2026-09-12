@@ -1,10 +1,12 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { Prisma, type PrismaClient } from "@podium/db";
 import { randomUUID } from "crypto";
 import type { CreateAdjustmentNoteInput, CreateInvoiceInput, RecordPaymentInput } from "@podium/shared-types";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
+import { MailService } from "../common/mail/mail.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
+import { InvoicePdfService, type InvoicePdfData } from "./invoice-pdf.service";
 
 type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
 
@@ -30,9 +32,13 @@ function financialYearFor(date: Date): string {
  */
 @Injectable()
 export class InvoicesService {
+  private readonly logger = new Logger(InvoicesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly cityScope: CityScopeService,
+    private readonly pdf: InvoicePdfService,
+    private readonly mail: MailService,
   ) {}
 
   list(user: RequestUser, cityId?: string) {
@@ -179,5 +185,196 @@ export class InvoicesService {
     const invoice = await this.get(user, invoiceId);
     if (invoice.status === "DRAFT") throw new BadRequestException("Debit notes apply to issued invoices only — edit the draft directly instead.");
     return this.prisma.client.debitNote.create({ data: { invoiceId, amount: input.amount, reason: input.reason, createdById: user.id } });
+  }
+
+  /**
+   * Cancels a DRAFT invoice. DRAFT-only, deliberately: an ISSUED invoice has
+   * a minted, gap-free number and is a tax document, so it is never
+   * cancelled or deleted — the only correction path is a credit note (see
+   * class doc). Soft-deletes rather than hard-deleting so the number
+   * placeholder and the audit trail stay resolvable.
+   */
+  async cancel(user: RequestUser, id: string, reason?: string) {
+    return this.prisma.client.$transaction(async (tx) => {
+      const invoice = await tx.invoice.findFirst({ where: { id, workspaceId: user.workspaceId, deletedAt: null } });
+      if (!invoice) throw new NotFoundException("Invoice not found.");
+      this.cityScope.assertCanAccessCity(user, invoice.cityId);
+      if (invoice.status !== "DRAFT") {
+        throw new ConflictException(
+          `Only a DRAFT invoice can be cancelled — this one is ${invoice.status}. An issued invoice is a tax ` +
+            "document and is corrected with a credit note, never cancelled.",
+        );
+      }
+      return tx.invoice.update({
+        where: { id },
+        data: { status: "CANCELLED", deletedAt: new Date() },
+      });
+    });
+  }
+
+  /**
+   * Loads an invoice and renders it as a PDF. Every value on the page comes
+   * from the stored row — nothing is passed in by the caller beyond the id.
+   */
+  async renderPdf(user: RequestUser, id: string): Promise<{ buffer: Buffer; filename: string }> {
+    const invoice = await this.get(user, id);
+    const workspace = await this.prisma.client.workspace.findUniqueOrThrow({ where: { id: invoice.workspaceId } });
+
+    const data: InvoicePdfData = {
+      invoiceNo: invoice.invoiceNo,
+      issueDate: invoice.issueDate,
+      dueDate: invoice.dueDate,
+      status: invoice.status,
+      placeOfSupply: invoice.placeOfSupply,
+      taxableAmount: invoice.taxableAmount.toNumber(),
+      cgst: invoice.cgst.toNumber(),
+      sgst: invoice.sgst.toNumber(),
+      igst: invoice.igst.toNumber(),
+      total: invoice.total.toNumber(),
+      workspace: { name: workspace.name, gstin: workspace.gstin },
+      city: { name: invoice.city.name, state: invoice.city.state, gstStateCode: invoice.city.gstStateCode },
+      client: {
+        name: invoice.client.name,
+        address: invoice.client.address,
+        gstin: invoice.client.gstin,
+        gstStateCode: invoice.client.gstStateCode,
+      },
+      project: { name: invoice.project.name },
+      items: invoice.items.map((i) => ({
+        description: i.description,
+        qty: i.qty.toNumber(),
+        rate: i.rate.toNumber(),
+        hsnSac: i.hsnSac,
+      })),
+      payments: invoice.payments.map((p) => ({ amount: p.amount.toNumber(), receivedAt: p.receivedAt, method: p.method })),
+      creditNotes: invoice.creditNotes.map((n) => ({ amount: n.amount.toNumber(), reason: n.reason })),
+      debitNotes: invoice.debitNotes.map((n) => ({ amount: n.amount.toNumber(), reason: n.reason })),
+    };
+
+    const buffer = await this.pdf.render(data);
+    // Invoice numbers contain slashes (AMM/JPR/26-27/0001) which are not
+    // legal in a filename.
+    const filename = `${invoice.invoiceNo.replace(/\//g, "-")}.pdf`;
+    return { buffer, filename };
+  }
+
+  /**
+   * E-mails an issued invoice to the client, PDF attached. DRAFT invoices
+   * are not sendable — an unissued invoice has no real number and no final
+   * GST split, so sending one would put a document in a client's inbox that
+   * does not correspond to anything in AMM's books.
+   */
+  async emailToClient(user: RequestUser, id: string) {
+    const invoice = await this.get(user, id);
+    if (invoice.status === "DRAFT") {
+      throw new BadRequestException("This invoice is still a DRAFT — issue it before sending it to the client.");
+    }
+    if (!invoice.client.email) {
+      throw new BadRequestException(`${invoice.client.name} has no e-mail address on file — add one before sending.`);
+    }
+
+    const { buffer, filename } = await this.renderPdf(user, id);
+    const total = invoice.total.toNumber();
+    const paid = invoice.payments.reduce((s, p) => s + p.amount.toNumber(), 0);
+    const balance = total - paid;
+
+    const sent = await this.mail.send({
+      to: invoice.client.email,
+      subject: `Invoice ${invoice.invoiceNo} from AMM Brands LLP`,
+      text:
+        `Dear ${invoice.client.name},\n\n` +
+        `Please find attached invoice ${invoice.invoiceNo} for ${invoice.project.name}.\n\n` +
+        `Invoice total: INR ${total.toFixed(2)}\n` +
+        `Balance due: INR ${balance.toFixed(2)}\n` +
+        `Due date: ${invoice.dueDate.toISOString().slice(0, 10)}\n\n` +
+        `Please quote ${invoice.invoiceNo} in your payment reference.\n\n` +
+        `AMM Brands LLP`,
+      attachments: [{ filename, content: buffer, contentType: "application/pdf" }],
+    });
+
+    await this.prisma.client.auditLog.create({
+      data: {
+        workspaceId: user.workspaceId,
+        actorId: user.id,
+        action: "invoice.emailed",
+        entityType: "invoice",
+        entityId: id,
+        after: { to: invoice.client.email, mode: sent.mode, messageId: sent.messageId },
+      },
+    });
+
+    return { ok: true, to: invoice.client.email, mode: sent.mode, messageId: sent.messageId };
+  }
+
+  /**
+   * Transitions ISSUED / PARTIALLY_PAID invoices past their due date to
+   * OVERDUE. Run from the BullMQ worker (workers/), NOT an in-process cron —
+   * with more than one API instance an in-process schedule fires once per
+   * instance, and "it's idempotent so the duplicate is harmless" is a
+   * mitigation, not a design.
+   *
+   * Deliberately NOT city-scoped and NOT permission-gated: it runs as the
+   * system, over the whole workspace, with no user in the request context.
+   * It is exported as a service method (rather than living in the worker) so
+   * the same code path is what the e2e test drives.
+   */
+  async sweepOverdue(now: Date = new Date()): Promise<{ transitioned: number; invoiceIds: string[] }> {
+    const due = await this.prisma.client.invoice.findMany({
+      where: {
+        deletedAt: null,
+        status: { in: ["ISSUED", "PARTIALLY_PAID"] },
+        dueDate: { lt: now },
+      },
+      include: { project: true, client: true },
+    });
+    if (due.length === 0) return { transitioned: 0, invoiceIds: [] };
+
+    const transitioned: string[] = [];
+    for (const invoice of due) {
+      await this.prisma.client.$transaction(async (tx) => {
+        // Re-read under the transaction: a payment could have landed between
+        // the scan above and this write, taking the invoice to PAID. The
+        // status filter in the update makes that a no-op rather than a
+        // regression from PAID back to OVERDUE.
+        const updated = await tx.invoice.updateMany({
+          where: { id: invoice.id, status: { in: ["ISSUED", "PARTIALLY_PAID"] }, dueDate: { lt: now } },
+          data: { status: "OVERDUE" },
+        });
+        if (updated.count === 0) return;
+
+        transitioned.push(invoice.id);
+        await tx.auditLog.create({
+          data: {
+            workspaceId: invoice.workspaceId,
+            actorId: null, // system sweep, not a human action
+            action: "invoice.marked_overdue",
+            entityType: "invoice",
+            entityId: invoice.id,
+            after: { invoiceNo: invoice.invoiceNo, dueDate: invoice.dueDate, previousStatus: invoice.status },
+          },
+        });
+
+        // Notify the project's PM. If the project has no PM there is nobody
+        // specific to tell — the audit row above is still written, so the
+        // transition is never silent.
+        if (invoice.project.pmId) {
+          await tx.notification.create({
+            data: {
+              workspaceId: invoice.workspaceId,
+              userId: invoice.project.pmId,
+              icon: "⚠",
+              text: `Invoice ${invoice.invoiceNo} (${invoice.client.name}) is overdue — due ${invoice.dueDate.toISOString().slice(0, 10)}.`,
+              sourceType: "invoice",
+              sourceId: invoice.id,
+            },
+          });
+        }
+      });
+    }
+
+    if (transitioned.length > 0) {
+      this.logger.log(`Overdue sweep: ${transitioned.length} invoice(s) transitioned to OVERDUE.`);
+    }
+    return { transitioned: transitioned.length, invoiceIds: transitioned };
   }
 }

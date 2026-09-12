@@ -3,6 +3,8 @@ import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as bcrypt from "bcryptjs";
 import { createHash, randomBytes } from "crypto";
+import { MailConfigService } from "../common/mail/mail-config.service";
+import { MailService } from "../common/mail/mail.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { AcceptInviteInput, ChangePasswordInput, LoginInput } from "@podium/shared-types";
 
@@ -21,6 +23,8 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly mail: MailService,
+    private readonly mailConfig: MailConfigService,
   ) {}
 
   async login(input: LoginInput) {
@@ -158,7 +162,42 @@ export class AuthService {
       }),
     ]);
     const webBaseUrl = this.config.get<string>("WEB_BASE_URL") ?? "http://localhost:3000";
-    return { token: raw, inviteUrl: `${webBaseUrl}/accept-invite?token=${raw}`, expiresInDays: INVITE_TOKEN_TTL_MS / 86_400_000 };
+    const inviteUrl = `${webBaseUrl}/accept-invite?token=${raw}`;
+
+    /**
+     * Mail delivery is attempted only when it is actually configured. When
+     * MAIL_MODE is `disabled` the invite is still issued and the URL still
+     * returned — an admin can hand it over out of band — but the response
+     * says plainly that nothing was e-mailed, rather than implying the user
+     * has been notified when they have not. This is the `delivery` field's
+     * whole purpose: never let the caller believe a message was sent.
+     */
+    let delivery: { emailed: boolean; mode: string; reason?: string };
+    if (this.mailConfig.mode === "disabled") {
+      delivery = { emailed: false, mode: "disabled", reason: "MAIL_MODE is disabled — share the inviteUrl manually." };
+    } else {
+      try {
+        const sent = await this.mail.send({
+          to: user.email,
+          subject: "Set your Podium password",
+          text:
+            `Hello ${user.name},\n\n` +
+            `An account has been created for you on Podium, AMM Brands' operating system.\n\n` +
+            `Set your password here (the link is single-use and expires in ${INVITE_TOKEN_TTL_MS / 86_400_000} days):\n` +
+            `${inviteUrl}\n\n` +
+            `If you weren't expecting this, you can ignore this message — the link does nothing until it's used.\n`,
+        });
+        delivery = { emailed: true, mode: sent.mode };
+      } catch (err) {
+        // A mail failure must not void an already-issued token: the invite
+        // row is committed, so swallowing the send error and reporting it is
+        // strictly better than throwing and leaving a usable token behind
+        // that the caller believes was never created.
+        delivery = { emailed: false, mode: this.mailConfig.mode, reason: (err as Error).message };
+      }
+    }
+
+    return { token: raw, inviteUrl, expiresInDays: INVITE_TOKEN_TTL_MS / 86_400_000, delivery };
   }
 
   /** BUG-003: consumes a one-time invite/reset token and sets the user's password. */

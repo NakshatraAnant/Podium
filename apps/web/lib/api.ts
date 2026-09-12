@@ -56,6 +56,43 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return body as T;
 }
 
+/**
+ * Downloads a binary response (currently: invoice PDFs) and hands the
+ * browser a file.
+ *
+ * Deliberately NOT a plain `<a href>`: the API authenticates from the
+ * Authorization header, and the alternative — putting the access token in
+ * the URL as a query parameter — would leak a live credential into browser
+ * history, the Referer header and any intermediary's access logs. So the
+ * fetch carries the header, and the resulting blob is handed to a synthetic
+ * anchor that is revoked immediately afterwards.
+ */
+export async function apiDownload(path: string, fallbackFilename: string): Promise<void> {
+  const token = getAccessToken();
+  const res = await fetch(`/api${path}`, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => undefined);
+    throw new ApiError(res.status, body?.error?.code ?? "UNKNOWN", body?.error?.message ?? res.statusText);
+  }
+
+  // Prefer the server's own filename — it knows the real invoice number.
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  const filename = match?.[1] ?? fallbackFilename;
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   get: <T>(path: string) => apiFetch<T>(path),
   post: <T>(path: string, data?: unknown) => apiFetch<T>(path, { method: "POST", body: data ? JSON.stringify(data) : undefined }),

@@ -43,3 +43,6 @@ Thumbs.db
 .turbo/
 backups/
 .run/
+
+# Playwright/browser verification scratch output
+verify-ui-tmp*.js

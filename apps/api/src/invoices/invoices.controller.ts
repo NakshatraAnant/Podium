@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Headers, Param, Post, Query } from "@nestjs/common";
-import { createAdjustmentNoteSchema, createInvoiceSchema, recordPaymentSchema } from "@podium/shared-types";
+import { Body, Controller, Get, Headers, Param, Post, Query, Res } from "@nestjs/common";
+import type { Response } from "express";
+import { cancelInvoiceSchema, createAdjustmentNoteSchema, createInvoiceSchema, recordPaymentSchema } from "@podium/shared-types";
 import { Audit } from "../common/decorators/audit.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { RequirePermissions } from "../common/decorators/require-permissions.decorator";
@@ -52,6 +53,40 @@ export class InvoicesController {
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     return this.invoices.recordPayment(user, id, body, idempotencyKey);
+  }
+
+  /** DRAFT-only. An issued invoice is corrected with a credit note, never cancelled. */
+  @Post(":id/cancel")
+  @RequirePermissions("invoices:delete")
+  @Audit("invoice", "invoice.cancel")
+  cancel(
+    @CurrentUser() user: RequestUser,
+    @Param("id") id: string,
+    @Body(new ZodValidationPipe(cancelInvoiceSchema)) body: ReturnType<typeof cancelInvoiceSchema.parse>,
+  ) {
+    return this.invoices.cancel(user, id, body.reason);
+  }
+
+  /**
+   * Streams the invoice as a PDF rendered server-side from the stored row.
+   * Permission-gated identically to reading the invoice itself.
+   */
+  @Get(":id/pdf")
+  @RequirePermissions("invoices:view")
+  async pdf(@CurrentUser() user: RequestUser, @Param("id") id: string, @Res() res: Response) {
+    const { buffer, filename } = await this.invoices.renderPdf(user, id);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", String(buffer.length));
+    res.end(buffer);
+  }
+
+  /** E-mails the issued invoice with its PDF attached. Refuses on DRAFT. */
+  @Post(":id/email")
+  @RequirePermissions("invoices:edit")
+  @Audit("invoice", "invoice.email_requested")
+  email(@CurrentUser() user: RequestUser, @Param("id") id: string) {
+    return this.invoices.emailToClient(user, id);
   }
 
   @Post(":id/credit-notes")
