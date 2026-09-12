@@ -6,16 +6,31 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
 import { StatusPill } from "../../components/StatusPill";
 import { api } from "../../lib/api";
-import type { ApprovalDto, ProjectDto, RiskDto } from "../../lib/types";
+import type { ApprovalDto, PnlActualsDto, ProjectDto, RiskDto } from "../../lib/types";
 
 export default function DashboardPage() {
   const router = useRouter();
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<ProjectDto[]>("/projects") });
-  const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api.get<ApprovalDto[]>("/approvals") });
-  const risks = useQuery({ queryKey: ["risks"], queryFn: () => api.get<RiskDto[]>("/risks") });
+  // A user without a grant on a widget's underlying resource (e.g. Finance
+  // lacks risks:view) must not blow up the whole dashboard with a failed
+  // query — retry: false and a plain empty state instead, per-widget.
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.get<ApprovalDto[]>("/approvals"),
+    retry: false,
+  });
+  const risks = useQuery({ queryKey: ["risks"], queryFn: () => api.get<RiskDto[]>("/risks"), retry: false });
+  // Real net revenue (blueprint §18), not a client-side sum of project.revenue
+  // (a bookings figure — the value a deal was won at, not recognised
+  // revenue). Company-wide, trailing from the start of the calendar year —
+  // ReportsService's own default range.
+  const pnl = useQuery({
+    queryKey: ["dashboard-pnl"],
+    queryFn: () => api.get<PnlActualsDto>("/reports/pnl?scope=company"),
+    retry: false,
+  });
 
   const list = projects.data ?? [];
-  const totalRevenue = list.reduce((s, p) => s + Number(p.revenue), 0);
   const activeCount = list.filter((p) => p.status !== "COMPLETED").length;
   const redCount = list.filter((p) => p.health === "RED").length;
   const upcoming = [...list].sort((a, b) => new Date(a.eventDate).getTime() - new Date(b.eventDate).getTime()).slice(0, 6);
@@ -37,9 +52,16 @@ export default function DashboardPage() {
           <div className="v">{activeCount}</div>
           <div className="d">{redCount} at risk</div>
         </div>
-        <div className="stat" style={{ borderLeftColor: "var(--green)" }}>
-          <div className="k">Revenue (live projects)</div>
-          <div className="v">{fmtINR(totalRevenue)}</div>
+        <div className="stat" style={{ borderLeftColor: "var(--green)", cursor: "pointer" }} onClick={() => router.push("/reports")}>
+          <div className="k">Net revenue — actuals, this year</div>
+          <div className="v">{pnl.data?.hasData ? fmtINR(pnl.data.revenue.netRevenue) : "—"}</div>
+          <div className="d">
+            {pnl.data && !pnl.data.hasData
+              ? "no real transactions yet"
+              : pnl.data
+                ? `${fmtINR(pnl.data.collections.outstanding)} outstanding · full P&L →`
+                : ""}
+          </div>
         </div>
         <div className="stat" style={{ borderLeftColor: "var(--blue)" }}>
           <div className="k">Pending approvals</div>

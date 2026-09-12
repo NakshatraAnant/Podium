@@ -46,3 +46,4 @@ backups/
 
 # Playwright/browser verification scratch output
 verify-ui-tmp*.js
+dump.rdb

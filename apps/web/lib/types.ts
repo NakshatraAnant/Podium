@@ -171,3 +171,42 @@ export interface BudgetDto {
   projectId: string;
   lines: Array<{ id: string; category: string; plannedAmount: string | number }>;
 }
+
+// -------------------------------------------------------------- reports/P&L
+export interface PnlActualsDto {
+  kind: "actuals";
+  scope: "company" | "city" | "project";
+  from: string;
+  to: string;
+  hasData: boolean;
+  explanation: string | null;
+  revenue: { netRevenue: number; gstCollected: number; grossInvoiced: number; invoiceCount: number };
+  collections: { received: number; outstanding: number; paymentCount: number };
+  costs: { expenses: number; purchaseOrders: number; total: number };
+  margin: { grossMargin: number; grossMarginPct: number | null };
+}
+
+export interface PnlByCityDto {
+  kind: "actuals";
+  hasData: boolean;
+  cities: Array<{ city: { id: string; name: string; code: string } } & PnlActualsDto>;
+}
+
+export interface CashFlowDto {
+  kind: "actuals";
+  from: string;
+  to: string;
+  hasData: boolean;
+  explanation: string | null;
+  series: Array<{ month: string; inflow: number; outflow: number; net: number }>;
+  totals: { inflow: number; outflow: number; net: number };
+}
+
+export interface ForecastDto {
+  kind: "forecast";
+  basis: "none" | "caller_supplied_baseline" | "trailing_12_month_actuals";
+  hasData: boolean;
+  monthlyBaseline?: number;
+  explanation: string;
+  series: Array<{ month: string; seasonalityIndex: number; projectedNetRevenue: number }>;
+}

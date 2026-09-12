@@ -32,6 +32,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
       { href: "/clients", icon: "☺", label: "Clients" },
       { href: "/invoices", icon: "₹", label: "Invoices" },
       { href: "/expenses", icon: "⇄", label: "Expenses" },
+      { href: "/reports", icon: "▤", label: "Reports & P&L" },
     ],
   },
   {
