@@ -13,10 +13,21 @@
  * is called on every sheet name before any cell of it is touched, and throws
  * rather than skipping quietly, so a future edit can't silently start reading it.
  *
- * This script is destructive by design (see `purgeSyntheticData`) and is not
- * the dev seed: `pnpm --filter @podium/db seed` still builds the demo fixture
- * that CI and the e2e suite run against. Run this only against a database you
- * intend to hold production data.
+ * This is not the dev seed: `pnpm --filter @podium/db seed` builds the demo
+ * fixture that CI and the e2e suite run against, and refuses to run against
+ * anything that looks like real data (see packages/db/prisma/seed.ts).
+ *
+ * BUG-002 fix (2026-09-12 CTO audit): this importer is ADDITIVE and
+ * IDEMPOTENT. It never deletes anything — the destructive
+ * purge-then-reimport this script used to run on every invocation has been
+ * retired (see the historical comment where `purgeSyntheticData` used to be,
+ * a few hundred lines below). Every row is keyed on a deterministic
+ * `externalRef` computed from its exact source location (sheet name + row
+ * index), enforced by a real `@@unique([workspaceId, externalRef])`
+ * constraint — so running this twice against the same files inserts zero new
+ * rows, and running it again after AMM sends an updated spreadsheet inserts
+ * only the rows that are genuinely new. Verified live — see docs/STATUS.md
+ * §1.2.
  *
  * Usage:  pnpm import:real-data [--dry-run]
  */
@@ -143,6 +154,76 @@ function parseAmount(raw: string | null): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 }
 
+/**
+ * BUG-002 fix: the idempotency key every insert is keyed on. Deterministic
+ * per source row — same sheet, same row index, every time this script runs
+ * against the same files — so a re-run recognizes a row it already imported
+ * (via the `@@unique([workspaceId, externalRef])` constraint + createMany's
+ * skipDuplicates) instead of creating a second copy of it.
+ *
+ * Row index, not row content, is what's hashed in: two different real people
+ * can legitimately share a name, a phone-less blank, or (for the Cocktail
+ * Shop dump specifically — see importRetail) even the "Customer ID" text,
+ * which is not actually a unique key in that sheet. Row position in an
+ * unchanging source file is the one thing that is both stable across re-runs
+ * and genuinely distinct per real row.
+ *
+ * Known, accepted limitation: if AMM ever re-orders or inserts rows in the
+ * MIDDLE of an already-imported sheet (rather than only appending new ones
+ * at the end), rows after the insertion point would shift index and be
+ * re-imported as if new. None of these sheets are live-edited AMM exports —
+ * they are point-in-time snapshots — so this is a reasonable trade-off
+ * against building real per-contact IDs these spreadsheets never had.
+ */
+function computeExternalRef(tag: string, sheetName: string, rowIndex: number): string {
+  return `${tag}:${sheetName}:${rowIndex}`;
+}
+
+/**
+ * BUG-002 fix, second half: `externalRef` alone cannot protect a row that
+ * predates this fix — an already-imported phone-less row has externalRef
+ * NULL (the column did not exist yet, or for clients it held the old,
+ * non-unique raw value), so its stored key can never match what a fresh
+ * parse computes, and nothing else distinguishes it from a "new" row.
+ *
+ * Rather than trying to retroactively reconstruct a matching key for
+ * ~4,600 already-imported rows (some of which are themselves genuine
+ * duplicate entries already sitting in AMM's own source spreadsheet — see
+ * docs/STATUS.md §1.2), phone-less rows get an extra, simpler guard: before
+ * insertion, check whether a row with the same natural key (name, scoped to
+ * the same table and — for leads — the same kind) already exists in the
+ * database at all, regardless of its externalRef. If so, skip it.
+ *
+ * This is deliberately conservative: on the rare occasion two DIFFERENT real
+ * people or companies happen to share an exact name with no phone to tell
+ * them apart, a genuinely new one added later would also be skipped. That is
+ * an accepted trade-off — under-inserting a rare coincidence is a far safer
+ * failure mode than silently duplicating real customer/vendor/lead records,
+ * which is the actual harm BUG-002 exists to prevent. On a first-ever import
+ * into an empty database these sets are empty, so nothing is skipped and
+ * behaviour is unchanged from before this fix.
+ */
+async function loadExistingNoPhoneKeys(wsId: string) {
+  const [clients, vendors, freelancers, leads] = await Promise.all([
+    prisma.client.findMany({ where: { workspaceId: wsId, phone: null }, select: { name: true, segment: true, email: true } }),
+    prisma.vendor.findMany({ where: { workspaceId: wsId }, select: { name: true } }),
+    prisma.freelancer.findMany({ where: { workspaceId: wsId, phone: null }, select: { name: true } }),
+    prisma.lead.findMany({ where: { workspaceId: wsId, phone: null }, select: { name: true, kind: true } }),
+  ]);
+  return {
+    clients: new Set(clients.map((c) => `${c.segment}:${c.name}`)),
+    // §8 retail rows are near-anonymous (no name), so name-based keying
+    // doesn't apply to them — email is their natural key instead (verified
+    // unique among phone-less retail rows; see docs/STATUS.md §1.2).
+    retailEmails: new Set(
+      clients.filter((c) => c.segment === "RETAIL_CUSTOMER" && c.email).map((c) => c.email!.toLowerCase()),
+    ),
+    vendors: new Set(vendors.map((v) => v.name)),
+    freelancers: new Set(freelancers.map((f) => f.name)),
+    leads: new Set(leads.map((l) => `${l.kind}:${l.name}`)),
+  };
+}
+
 function parseInt10(raw: string | null): number | null {
   if (!raw) return null;
   const m = String(raw).match(/\d+/);
@@ -258,92 +339,23 @@ function buildCityMatcher(cities: { id: string; code: string }[]) {
 // =========================================================================
 
 /**
- * Removes the development seed's synthetic records. Clients and vendors are
- * load-bearing: 11 demo projects and 10 demo invoices hang off them, so
- * "no synthetic clients remain" necessarily means removing the demo
- * transactional dataset too. That cascade is explicit here rather than left
- * to the database, so the blast radius is reviewable.
+ * BUG-002 (2026-09-12 CTO audit): this function used to run before every
+ * import, deleting ALL rows from clients/vendors/freelancers/leads/projects/
+ * invoices/tasks/flows — not just synthetic ones. It was safe exactly once,
+ * the day the real AMM data first replaced the dev seed fixture, and
+ * dangerous every time after: re-running the importer against a database
+ * that now holds real projects, invoices, or manually-entered data would
+ * have deleted all of it.
  *
- * Deliberately NOT touched: cities, users, roles/permissions, inventory items,
- * locations, balances and movements, flow templates, playbooks, SOPs,
- * automation rules — configuration and the inventory ledger, none of which is
- * client- or vendor-derived. `audit_logs` is never deleted; it is the
- * immutable trail, including of this import.
+ * It has been retired. The importer is now additive and idempotent instead:
+ * every insert below is keyed on a deterministic `externalRef` (see
+ * `computeExternalRef` and each entity's `@@unique([workspaceId,
+ * externalRef])` constraint), so re-running against the same source files
+ * inserts zero new rows and deletes nothing, and re-running against UPDATED
+ * source files inserts only the genuinely new rows. Verified by running the
+ * importer twice in a row against the live real database — see
+ * docs/STATUS.md §1.2.
  */
-type Tx = Parameters<Parameters<PrismaClient["$transaction"]>[0]>[0];
-
-async function purgeSyntheticData(tx: Tx) {
-  const before = {
-    clients: await tx.client.count(),
-    vendors: await tx.vendor.count(),
-    freelancers: await tx.freelancer.count(),
-    leads: await tx.lead.count(),
-    projects: await tx.project.count(),
-    invoices: await tx.invoice.count(),
-  };
-
-  // Project-linked rows reachable only through an optional FK — delete them
-  // (they exist solely because a demo project did) before the projects go.
-  const projectIds = (await tx.project.findMany({ select: { id: true } })).map((p) => p.id);
-  if (projectIds.length) {
-    const channelIds = (await tx.channel.findMany({ where: { projectId: { in: projectIds } }, select: { id: true } })).map((c) => c.id);
-    await tx.message.deleteMany({ where: { channelId: { in: channelIds } } });
-    await tx.channelMember.deleteMany({ where: { channelId: { in: channelIds } } });
-    await tx.channel.deleteMany({ where: { projectId: { in: projectIds } } });
-
-    const documentIds = (await tx.document.findMany({ where: { projectId: { in: projectIds } }, select: { id: true } })).map((d) => d.id);
-    await tx.documentVersion.deleteMany({ where: { documentId: { in: documentIds } } });
-    await tx.document.deleteMany({ where: { projectId: { in: projectIds } } });
-
-    const meetingIds = (await tx.meeting.findMany({ where: { projectId: { in: projectIds } }, select: { id: true } })).map((m) => m.id);
-    await tx.meetingActionItem.deleteMany({ where: { meetingId: { in: meetingIds } } });
-    await tx.meeting.deleteMany({ where: { projectId: { in: projectIds } } });
-
-    await tx.licence.deleteMany({ where: { projectId: { in: projectIds } } });
-    await tx.email.deleteMany({ where: { linkedProjectId: { in: projectIds } } });
-    await tx.notification.deleteMany({ where: { sourceType: { in: ["project", "task", "flow_step", "invoice", "approval", "risk"] } } });
-  }
-  // Inventory items survive; they just lose their demo preferred vendor.
-  await tx.inventoryItem.updateMany({ where: { preferredVendorId: { not: null } }, data: { preferredVendorId: null } });
-
-  // Required-FK closure, children first.
-  await tx.flowStepRun.deleteMany({});
-  await tx.flowStepDependency.deleteMany({});
-  await tx.flowStep.deleteMany({});
-  await tx.flowInstance.deleteMany({});
-  await tx.taskDependency.deleteMany({});
-  await tx.task.deleteMany({});
-  await tx.runsheetItem.deleteMany({});
-  await tx.runsheet.deleteMany({});
-  await tx.eventDayCheckin.deleteMany({});
-  await tx.eventDayIncident.deleteMany({});
-  await tx.inventoryReservation.deleteMany({});
-  await tx.goodsReceipt.deleteMany({});
-  await tx.purchaseOrderItem.deleteMany({});
-  await tx.purchaseOrder.deleteMany({});
-  await tx.purchaseRequest.deleteMany({});
-  await tx.budgetLine.deleteMany({});
-  await tx.budget.deleteMany({});
-  await tx.expense.deleteMany({});
-  await tx.creditNote.deleteMany({});
-  await tx.debitNote.deleteMany({});
-  await tx.payment.deleteMany({});
-  await tx.invoiceItem.deleteMany({});
-  await tx.invoice.deleteMany({});
-  await tx.risk.deleteMany({});
-  await tx.approval.deleteMany({});
-  await tx.projectVendor.deleteMany({});
-  await tx.projectMember.deleteMany({});
-  await tx.clientContact.deleteMany({});
-  await tx.vendorContact.deleteMany({});
-  await tx.lead.deleteMany({});
-  await tx.project.deleteMany({});
-  await tx.client.deleteMany({});
-  await tx.vendor.deleteMany({});
-  await tx.freelancer.deleteMany({});
-
-  return before;
-}
 
 // =========================================================================
 // Column vocabulary shared by the varied prospecting sheets
@@ -397,14 +409,10 @@ async function main() {
   const amm = openWorkbook(AMM_FILE);
   const elixir = openWorkbook(ELIXIR_FILE);
 
-  // ---------------------------------------------------------------- purge
-  if (!DRY_RUN) {
-    // All-or-nothing: a purge that half-applied would leave the database with
-    // orphaned projects and no clients, which is worse than either end state.
-    const before = await prisma.$transaction((tx) => purgeSyntheticData(tx), { timeout: 120_000 });
-    report.purged = before;
-    console.log("Purged synthetic seed data:", before);
-  }
+  // BUG-002 fix: no purge here anymore. Every insert below is additive and
+  // idempotent (externalRef-keyed) — see the historical comment above. For
+  // phone-less rows specifically, also see loadExistingNoPhoneKeys.
+  const existing = await loadExistingNoPhoneKeys(wsId);
 
   // ------------------------------------------------------- §3 event clients
   const clientSheet = readSheet(amm, "AMM CLIENT DATABASE");
@@ -435,12 +443,13 @@ async function main() {
   let clientRawRows = 0;
   let clientDupes = 0;
   let clientNoName = 0;
+  let clientAlreadyImported = 0;
   let sectionHeaders = 0;
   let vendorRowsInClientSheet = 0;
   let section: string | null = null;
   const sectionCounts: Record<string, number> = {};
 
-  for (const row of clientSheet.rows) {
+  for (const [rowIdx, row] of clientSheet.rows.entries()) {
     if (isSectionHeader(row)) {
       section = cell(row, cName);
       sectionHeaders++;
@@ -472,6 +481,13 @@ async function main() {
       clientDupes++; // §3: keep first occurrence
       continue;
     }
+    // BUG-002 fix: phone-less rows aren't protected by the (workspace, phone)
+    // constraint, so a row already sitting in the DB from a prior run is
+    // recognized here instead — see loadExistingNoPhoneKeys.
+    if (!phone && existing.clients.has(`EVENT_CLIENT:${name}`)) {
+      clientAlreadyImported++;
+      continue;
+    }
     const id = randomUUID();
     if (phone) clientByPhone.set(phone, { id, name });
     const label = section ?? "BAR CLIENTS";
@@ -479,6 +495,7 @@ async function main() {
     eventClients.push({
       id,
       workspaceId: wsId,
+      externalRef: computeExternalRef("AMM_CLIENT_DB", clientSheet.name, rowIdx),
       name,
       // Prefer the section label; only fall back to reading the name when the
       // sheet itself hasn't said which kind of list this is.
@@ -505,6 +522,7 @@ async function main() {
     droppedNoName: clientNoName,
     phoneDupes: clientDupes,
     withUsablePhone: clientByPhone.size,
+    alreadyImportedPhoneless: clientAlreadyImported,
     inserted: eventClients.length,
     perSection: sectionCounts,
   };
@@ -518,14 +536,22 @@ async function main() {
   const vAddr = col(vendorSheet.header, ["Address1"]);
 
   const vendors: any[] = [];
-  for (const row of vendorSheet.rows) {
+  let vendorAlreadyImported = 0;
+  for (const [rowIdx, row] of vendorSheet.rows.entries()) {
     const company = cell(row, vCompany);
     const contact = cell(row, vFirst);
     const name = company ?? contact;
     if (!name) continue;
+    // BUG-002 fix: vendors never have a phone, so this is the only guard
+    // against re-run duplication — see loadExistingNoPhoneKeys.
+    if (existing.vendors.has(name)) {
+      vendorAlreadyImported++;
+      continue;
+    }
     vendors.push({
       id: randomUUID(),
       workspaceId: wsId,
+      externalRef: computeExternalRef("AMM_VENDOR_SHEET", vendorSheet.name, rowIdx),
       name,
       category: null, // §4: F&B categorisation is a later UI pass
       cityId: null,
@@ -539,7 +565,7 @@ async function main() {
     });
   }
   if (!DRY_RUN) await insertChunked("vendors", vendors, (data) => prisma.vendor.createMany({ data, skipDuplicates: true }));
-  report.vendors = { rawRows: vendorSheet.rows.length, inserted: vendors.length };
+  report.vendors = { rawRows: vendorSheet.rows.length, alreadyImported: vendorAlreadyImported, inserted: vendors.length };
   console.log("§4 vendors:", report.vendors);
 
   // --------------------------------------------------------- §5 freelancers
@@ -551,7 +577,8 @@ async function main() {
   const freelancers: any[] = [];
   const freelancerPhones = new Set<string>();
   let freelancerDupes = 0;
-  for (const row of staffSheet.rows) {
+  let freelancerAlreadyImported = 0;
+  for (const [rowIdx, row] of staffSheet.rows.entries()) {
     const name = cell(row, fName);
     const { phone, phoneRaw } = normalizePhone(cell(row, fPhone));
     if (!name) continue;
@@ -559,10 +586,16 @@ async function main() {
       freelancerDupes++;
       continue;
     }
+    // BUG-002 fix — see loadExistingNoPhoneKeys.
+    if (!phone && existing.freelancers.has(name)) {
+      freelancerAlreadyImported++;
+      continue;
+    }
     if (phone) freelancerPhones.add(phone);
     freelancers.push({
       id: randomUUID(),
       workspaceId: wsId,
+      externalRef: computeExternalRef("AMM_EMPLOYEE_DATA", staffSheet.name, rowIdx),
       name,
       cityId: null,
       phone,
@@ -574,21 +607,26 @@ async function main() {
     });
   }
   if (!DRY_RUN) await insertChunked("freelancers", freelancers, (data) => prisma.freelancer.createMany({ data, skipDuplicates: true }));
-  report.freelancers = { rawRows: staffSheet.rows.length, phoneDupes: freelancerDupes, inserted: freelancers.length };
+  report.freelancers = {
+    rawRows: staffSheet.rows.length,
+    phoneDupes: freelancerDupes,
+    alreadyImportedPhoneless: freelancerAlreadyImported,
+    inserted: freelancers.length,
+  };
   console.log("§5 freelancers:", report.freelancers);
 
   // ------------------------------------------------- §6 the live pipeline
-  const pipeline = await importPipeline(elixir, wsId, matchCity, clientByPhone);
+  const pipeline = await importPipeline(elixir, wsId, matchCity, clientByPhone, existing.leads);
   report.leads_pipeline = pipeline.stats;
   console.log("§6 pipeline leads:", pipeline.stats);
 
   // --------------------------------------------------- §7 cold prospects
-  const cold = await importColdProspects(amm, wsId, matchCity, pipeline.phones);
+  const cold = await importColdProspects(amm, wsId, matchCity, pipeline.phones, existing.leads);
   report.leads_cold = cold.stats;
   console.log("§7 cold prospects:", cold.stats);
 
   // ------------------------------------------- §8 Cocktail Shop retail
-  const retail = await importRetail(amm, wsId, clientByPhone);
+  const retail = await importRetail(amm, wsId, clientByPhone, existing.retailEmails);
   report.clients_retail = retail.stats;
   console.log("§8 retail clients:", retail.stats);
 
@@ -629,12 +667,36 @@ async function main() {
 
 /**
  * `skipDuplicates` is a safety net against a unique-constraint violation
- * aborting a 51k-row load — but a row it silently absorbs is a dedupe bug
- * upstream, not an acceptable outcome. Every chunk's reported insert count is
- * checked against what was handed in, so a drop is surfaced instead of quietly
- * shrinking the import.
+ * aborting a 51k-row load. Two different things can cause a skip, and only
+ * one of them is a bug:
+ *
+ *  - two rows produced by THIS RUN'S OWN parsing/dedupe logic collide with
+ *    each other (e.g. the same externalRef computed twice) — that is a real
+ *    bug upstream, caught below before any insert is attempted;
+ *  - a row collides with one already sitting in the database from a PRIOR
+ *    run of this importer — that is BUG-002's entire point (2026-09-12 CTO
+ *    audit): re-running this script against the same source files must
+ *    insert zero new rows, not throw or duplicate. That is success, logged,
+ *    not an error.
+ *
+ * Before this fix, this function threw on ANY skip at all, which was correct
+ * only back when every run started from an empty table. Since the importer
+ * is now safe to re-run against a database that already holds the real data,
+ * "everything was already there" has to be a normal, quiet outcome.
  */
 async function insertChunked(label: string, rows: unknown[], run: (chunk: any[]) => Promise<{ count: number }>) {
+  const seenRefs = new Set<string>();
+  for (const r of rows as Array<{ externalRef?: string | null }>) {
+    if (r.externalRef == null) continue;
+    if (seenRefs.has(r.externalRef)) {
+      throw new Error(
+        `${label}: duplicate externalRef ${JSON.stringify(r.externalRef)} computed twice within this run — ` +
+          "that is a bug in this script's row parsing, not an expected cross-run skip. Fix the parsing.",
+      );
+    }
+    seenRefs.add(r.externalRef);
+  }
+
   let inserted = 0;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK) as any[];
@@ -643,11 +705,10 @@ async function insertChunked(label: string, rows: unknown[], run: (chunk: any[])
     if (rows.length > CHUNK) process.stdout.write(`\r  ${label}: ${Math.min(i + CHUNK, rows.length)}/${rows.length}`);
   }
   if (rows.length > CHUNK) process.stdout.write("\n");
-  if (inserted !== rows.length) {
-    throw new Error(
-      `${label}: ${rows.length - inserted} of ${rows.length} rows were dropped as duplicates. ` +
-        `Dedupe upstream of the insert is wrong — fix it rather than accepting a shorter import.`,
-    );
+
+  const skipped = rows.length - inserted;
+  if (skipped > 0) {
+    console.log(`  ${label}: ${inserted} new, ${skipped} already imported from a prior run (skipped, not an error)`);
   }
 }
 
@@ -669,6 +730,7 @@ async function importPipeline(
   wsId: string,
   matchCity: (t: string | null) => string | null,
   clientByPhone: Map<string, { id: string; name: string }>,
+  existingLeads: Set<string>,
 ) {
   /**
    * §6 dedupe: the same phone recurs across sheets (a lead tracked before
@@ -680,10 +742,17 @@ async function importPipeline(
   const noPhone: any[] = [];
   const perSheet: Record<string, number> = {};
   let rawRows = 0;
+  // BUG-002 fix: phone-less rows have no unique constraint to protect them on
+  // a re-run — see loadExistingNoPhoneKeys.
+  let noPhoneAlreadyImported = 0;
 
   const consider = (phone: string | null, data: any, priority: number) => {
     const filled = Object.values(data).filter((v) => v !== null && v !== undefined && v !== "").length;
     if (!phone) {
+      if (existingLeads.has(`PIPELINE:${data.name}`)) {
+        noPhoneAlreadyImported++;
+        return;
+      }
       noPhone.push(data);
       return;
     }
@@ -715,7 +784,7 @@ async function importPipeline(
     };
     perSheet[sheet.name] = sheet.rows.length;
 
-    for (const row of sheet.rows) {
+    for (const [rowIdx, row] of sheet.rows.entries()) {
       const contact = cell(row, idx.contact);
       const { phone, phoneRaw } = normalizePhone(cell(row, idx.phone));
       if (!contact && !phone) continue;
@@ -745,6 +814,7 @@ async function importPipeline(
         {
           id: randomUUID(),
           workspaceId: wsId,
+          externalRef: computeExternalRef("PIPELINE", sheet.name, rowIdx),
           name: contact ?? phone ?? "Unnamed lead",
           contactName: contact,
           phone,
@@ -795,7 +865,7 @@ async function importPipeline(
     pax: col(api.header, ["No of Guests"]),
   };
   perSheet[api.name] = api.rows.length;
-  for (const row of api.rows) {
+  for (const [rowIdx, row] of api.rows.entries()) {
     const name = cell(row, aIdx.name);
     const { phone, phoneRaw } = normalizePhone(cell(row, aIdx.phone));
     if (!name && !phone) continue;
@@ -805,7 +875,8 @@ async function importPipeline(
     consider(
       phone,
       {
-        id: randomUUID(), workspaceId: wsId, name: name ?? phone!, contactName: name, phone, phoneRaw,
+        id: randomUUID(), workspaceId: wsId, externalRef: computeExternalRef("PIPELINE", api.name, rowIdx),
+        name: name ?? phone!, contactName: name, phone, phoneRaw,
         stage: "LEAD", kind: "PIPELINE" as const, value: null,
         cityId: matchCity(locationText), locationText,
         eventType: cell(row, aIdx.eventType), pax: parseInt10(cell(row, aIdx.pax)),
@@ -827,7 +898,7 @@ async function importPipeline(
     remarks: col(shop.header, ["Remarks"]),
   };
   perSheet[shop.name] = shop.rows.length;
-  for (const row of shop.rows) {
+  for (const [rowIdx, row] of shop.rows.entries()) {
     const name = cell(row, sIdx.name);
     const { phone, phoneRaw } = normalizePhone(cell(row, sIdx.phone));
     if (!name && !phone) continue;
@@ -836,7 +907,8 @@ async function importPipeline(
     consider(
       phone,
       {
-        id: randomUUID(), workspaceId: wsId, name: name ?? phone!, contactName: name, phone, phoneRaw,
+        id: randomUUID(), workspaceId: wsId, externalRef: computeExternalRef("PIPELINE", shop.name, rowIdx),
+        name: name ?? phone!, contactName: name, phone, phoneRaw,
         stage: "LEAD", kind: "PIPELINE" as const, value: null,
         cityId: matchCity(locationText), locationText,
         eventType: cell(row, sIdx.product), pax: null, eventDate: null,
@@ -853,7 +925,7 @@ async function importPipeline(
 
   // ---- Elixir Form Response: attach to a matching lead, else create one
   const pipelinePhones = new Set(best.keys());
-  const formStats = await importFormResponses(wb, wsId, matchCity, pipelinePhones);
+  const formStats = await importFormResponses(wb, wsId, matchCity, pipelinePhones, existingLeads);
   // Form responses can create leads with phones the funnel sheets never had.
   // §7's dedupe must see those too, or a cold row carrying the same number
   // collides with them and is silently dropped by skipDuplicates.
@@ -868,10 +940,12 @@ async function importPipeline(
       sheets1to4_withoutPhone: withoutPhoneSheets1to4,
       afterPhoneDedupe: best.size,
       withoutPhone: noPhone.length,
+      alreadyImportedPhoneless: noPhoneAlreadyImported,
       inserted: rows.length,
       formResponses: {
         rawRows: formStats.rawRows,
         attachedToExistingLead: formStats.attachedToExistingLead,
+        alreadyImportedPhoneless: formStats.alreadyImportedPhoneless,
         createdAsNewLead: formStats.createdAsNewLead,
       },
     } as Stats,
@@ -890,6 +964,7 @@ async function importFormResponses(
   wsId: string,
   matchCity: (t: string | null) => string | null,
   pipelinePhones: Set<string>,
+  existingLeads: Set<string>,
 ) {
   const sheet = readSheet(wb, "Elixir Form Response");
   const h = sheet.header;
@@ -904,10 +979,13 @@ async function importFormResponses(
   };
 
   let attached = 0;
+  // BUG-002 fix: phone-less form responses had no dedupe at all against a
+  // prior run — see loadExistingNoPhoneKeys.
+  let alreadyImportedPhoneless = 0;
   const created: any[] = [];
   const seen = new Set<string>();
 
-  for (const row of sheet.rows) {
+  for (const [rowIdx, row] of sheet.rows.entries()) {
     const name = cell(row, idx.name);
     const { phone, phoneRaw } = normalizePhone(cell(row, idx.phone));
     if (!name && !phone) continue;
@@ -925,10 +1003,15 @@ async function importFormResponses(
     }
     if (phone && seen.has(phone)) continue;
     if (phone) seen.add(phone);
+    if (!phone && existingLeads.has(`PIPELINE:${name}`)) {
+      alreadyImportedPhoneless++;
+      continue;
+    }
     const locationText = cell(row, idx.location);
     const formDate = parseEventDate(row[idx.date]);
     created.push({
-      id: randomUUID(), workspaceId: wsId, name: name ?? phone!, contactName: name,
+      id: randomUUID(), workspaceId: wsId, externalRef: computeExternalRef("FORM_RESPONSE", sheet.name, rowIdx),
+      name: name ?? phone!, contactName: name,
       phone, phoneRaw, email: cell(row, idx.email),
       stage: "LEAD", kind: "PIPELINE" as const, value: null,
       cityId: matchCity(locationText), locationText,
@@ -943,6 +1026,7 @@ async function importFormResponses(
   return {
     rawRows: sheet.rows.length,
     attachedToExistingLead: attached,
+    alreadyImportedPhoneless,
     createdAsNewLead: created.length,
     createdPhones: seen,
   };
@@ -975,6 +1059,7 @@ async function importColdProspects(
   wsId: string,
   matchCity: (t: string | null) => string | null,
   pipelinePhones: Set<string>,
+  existingLeads: Set<string>,
 ) {
   const seen = new Set<string>(pipelinePhones); // §7 dedupes against §6 too
   const perSheet: Record<string, number> = {};
@@ -982,6 +1067,9 @@ async function importColdProspects(
   let rawRows = 0;
   let dropped = 0;
   let collapsed = 0;
+  // BUG-002 fix: phone-less cold prospects had no dedupe at all against a
+  // prior run — see loadExistingNoPhoneKeys.
+  let alreadyImportedPhoneless = 0;
 
   for (const sheetName of COLD_SHEETS) {
     const sheet = readSheet(wb, sheetName);
@@ -1002,7 +1090,7 @@ async function importColdProspects(
     };
     perSheet[sheet.name] = sheet.rows.length;
 
-    for (const row of sheet.rows) {
+    for (const [rowIdx, row] of sheet.rows.entries()) {
       const name = cell(row, idx.name);
       const contact = cell(row, idx.contact);
       const { phone, phoneRaw } = normalizePhone(cell(row, idx.phone));
@@ -1017,12 +1105,18 @@ async function importColdProspects(
         continue;
       }
       if (phone) seen.add(phone);
+      const coldName = name ?? contact;
+      if (!phone && existingLeads.has(`COLD_PROSPECT:${coldName}`)) {
+        alreadyImportedPhoneless++;
+        continue;
+      }
 
       const used = new Set(Object.values(idx).filter((i) => i >= 0));
       const locationText = cell(row, idx.location) ?? cell(row, idx.address);
       rows.push({
         id: randomUUID(),
         workspaceId: wsId,
+        externalRef: computeExternalRef("COLD", sheet.name, rowIdx),
         name: name ?? contact ?? phone!,
         contactName: contact,
         company: name,
@@ -1054,6 +1148,7 @@ async function importColdProspects(
       usableRows: rawRows,
       droppedBlank: dropped,
       collapsedByPhoneDedupe: collapsed,
+      alreadyImportedPhoneless,
       inserted: rows.length,
     } as Stats,
   };
@@ -1072,7 +1167,12 @@ async function importColdProspects(
  * `clients` is unique on (workspace, phone), and §9's principle — one human,
  * one record, the richer client wins — applies just as well here.
  */
-async function importRetail(wb: XLSX.WorkBook, wsId: string, clientByPhone: Map<string, { id: string; name: string }>) {
+async function importRetail(
+  wb: XLSX.WorkBook,
+  wsId: string,
+  clientByPhone: Map<string, { id: string; name: string }>,
+  existingRetailEmails: Set<string>,
+) {
   const sheet = readSheet(wb, "DATA DUMP");
   const idCol = col(sheet.header, ["Customer ID"]);
   const emailCol = col(sheet.header, ["Email"]);
@@ -1087,8 +1187,13 @@ async function importRetail(wb: XLSX.WorkBook, wsId: string, clientByPhone: Map<
   let dupEmail = 0;
   let overlapWithEventClient = 0;
   let unusable = 0;
+  // BUG-002 fix: phone-less retail rows have no unique constraint to protect
+  // them on a re-run (two NULL phones never collide) — see
+  // loadExistingNoPhoneKeys. This is exactly the gap that let a re-run
+  // duplicate all 330 phone-less retail customers before this check existed.
+  let alreadyImportedPhoneless = 0;
 
-  for (const row of sheet.rows) {
+  for (const [rowIdx, row] of sheet.rows.entries()) {
     /**
      * The two phone columns are not duplicates of each other: 24,743 rows fill
      * both, and the second column contributes ~29k numbers the first never
@@ -1129,8 +1234,23 @@ async function importRetail(wb: XLSX.WorkBook, wsId: string, clientByPhone: Map<
         continue;
       }
       seenEmail.add(key);
+      if (existingRetailEmails.has(key)) {
+        alreadyImportedPhoneless++;
+        continue;
+      }
     }
 
+    /**
+     * BUG-002 fix: `Customer ID` (captured above as `externalRef`) is NOT a
+     * unique key in this sheet — it is a business-name-like label and 3,375
+     * of them repeat across genuinely different real customers. Using it
+     * bare as the DB idempotency key would collapse those distinct people on
+     * the very first import, let alone a re-run. The row index is appended
+     * to make the STORED external_ref unique-per-row (satisfying the new
+     * `@@unique([workspaceId, externalRef])` constraint and giving re-runs a
+     * stable match), while the human-readable Customer ID text itself is
+     * kept as a prefix for traceability back to the source sheet.
+     */
     rows.push({
       id: randomUUID(),
       workspaceId: wsId,
@@ -1142,7 +1262,7 @@ async function importRetail(wb: XLSX.WorkBook, wsId: string, clientByPhone: Map<
       phone,
       phoneRaw,
       email,
-      externalRef,
+      externalRef: computeExternalRef(`RETAIL:${externalRef ?? "noid"}`, sheet.name, rowIdx),
       source: "Cocktail Shop DATA DUMP import",
       segment: "RETAIL_CUSTOMER" as const,
     });
@@ -1156,6 +1276,7 @@ async function importRetail(wb: XLSX.WorkBook, wsId: string, clientByPhone: Map<
       phoneDupes: dupPhone,
       emailDupes: dupEmail,
       alreadyAnEventClient: overlapWithEventClient,
+      alreadyImportedPhoneless,
       inserted: rows.length,
     } as Stats,
   };

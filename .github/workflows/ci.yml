@@ -7,10 +7,10 @@ on:
     branches: [main]
 
 env:
-  DATABASE_URL: "postgresql://podium:podium_ci_password@localhost:5432/podium_ci?schema=public"
+  DATABASE_URL: "postgresql://podium:podium_ci_password@localhost:5432/podium_ci_test?schema=public"
   # Prisma DROPS AND RECREATES whatever it is given here. It must never be
   # DATABASE_URL — see .env.example and docs/backup-and-restore.md.
-  SHADOW_DATABASE_URL: "postgresql://podium:podium_ci_password@localhost:5432/podium_ci_shadow?schema=public"
+  SHADOW_DATABASE_URL: "postgresql://podium:podium_ci_password@localhost:5432/podium_ci_test_shadow?schema=public"
   JWT_ACCESS_SECRET: "ci-only-access-secret-not-for-real-use"
   JWT_REFRESH_SECRET: "ci-only-refresh-secret-not-for-real-use"
   NODE_ENV: "test"
@@ -25,10 +25,10 @@ jobs:
         env:
           POSTGRES_USER: podium
           POSTGRES_PASSWORD: podium_ci_password
-          POSTGRES_DB: podium_ci
+          POSTGRES_DB: podium_ci_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U podium -d podium_ci"
+          --health-cmd "pg_isready -U podium -d podium_ci_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -79,7 +79,7 @@ jobs:
           pnpm --filter @podium/web build
 
       - name: Create the Prisma shadow database
-        run: PGPASSWORD=podium_ci_password psql -h localhost -U podium -d postgres -c "CREATE DATABASE podium_ci_shadow OWNER podium;"
+        run: PGPASSWORD=podium_ci_password psql -h localhost -U podium -d postgres -c "CREATE DATABASE podium_ci_test_shadow OWNER podium;"
 
       - name: Test — API (unit + e2e against the seeded CI database)
         run: pnpm --filter @podium/api test

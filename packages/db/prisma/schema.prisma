@@ -568,6 +568,12 @@ model Client {
   // One human = one client row. Postgres treats NULLs as distinct, so the
   // many phone-less rows coexist while real numbers can never duplicate.
   @@unique([workspaceId, phone])
+  /// BUG-002 fix: the idempotency key the real-data importer re-runs against.
+  /// Computed deterministically per source row (e.g. "AMM_CLIENT_DB:142") so a
+  /// re-run recognizes a row it already imported and skips it, rather than
+  /// depending only on phone (many rows have none) or Customer-ID-as-name
+  /// (not actually unique in the Cocktail Shop dump — see importRetail).
+  @@unique([workspaceId, externalRef])
   @@index([workspaceId, cityId])
   @@index([workspaceId, segment])
   @@map("clients")
@@ -620,6 +626,10 @@ model Lead {
   /// Exact source sheet, so a bad import batch can be traced or undone.
   sourceSheet String?   @map("source_sheet")
   sourceFile  String?   @map("source_file")
+  /// BUG-002 fix: idempotency key for re-running the real-data importer —
+  /// deterministic per source row (e.g. "PIPELINE:Sales Funnel:142"), since
+  /// most leads have no phone at all and dedupe cannot rely on that alone.
+  externalRef String?   @map("external_ref")
   /// Free-text location as written; only mapped to cityId on exact matches.
   locationText String?  @map("location_text")
   eventType   String?   @map("event_type")
@@ -648,6 +658,7 @@ model Lead {
 
   // Enforces §6/§7 dedupe at the database, not just in the import script.
   @@unique([workspaceId, phone])
+  @@unique([workspaceId, externalRef])
   @@index([workspaceId, stage])
   @@index([workspaceId, kind])
   @@map("leads")
@@ -667,6 +678,9 @@ model Vendor {
   phoneRaw    String?      @map("phone_raw")
   address     String?
   source      String?
+  /// BUG-002 fix: idempotency key for re-running the real-data importer —
+  /// see Client.externalRef for why this exists.
+  externalRef String?      @map("external_ref")
   rating      Decimal?     @db.Decimal(2, 1)
   gstin       String?
   status      VendorStatus @default(APPROVED)
@@ -684,6 +698,7 @@ model Vendor {
   purchaseOrders    PurchaseOrder[]
   inventoryItems    InventoryItem[]
 
+  @@unique([workspaceId, externalRef])
   @@index([workspaceId, cityId])
   @@map("vendors")
 }
@@ -1693,6 +1708,8 @@ model Freelancer {
   /// Free-text role from the roster, e.g. "BARTENDER", "CHEF".
   category       String?
   source         String?
+  /// BUG-002 fix: idempotency key for re-running the real-data importer.
+  externalRef    String?   @map("external_ref")
   /// IBG/BCII bartender certification expiry. Nullable because the real
   /// staffing roster records none — and a fabricated expiry date would drive
   /// real compliance decisions on event day. Unknown must stay unknown.
@@ -1710,6 +1727,7 @@ model Freelancer {
   city      City?     @relation(fields: [cityId], references: [id])
 
   @@unique([workspaceId, phone])
+  @@unique([workspaceId, externalRef])
   @@map("freelancers")
 }
 

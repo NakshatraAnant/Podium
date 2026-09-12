@@ -2,19 +2,40 @@
 #
 # Podium v2 — start everything, from nothing, in one command.
 #
-#   ./scripts/dev-up.sh              # demo fixture (safe, reproducible)
-#   ./scripts/dev-up.sh --real-data  # also import AMM's real spreadsheets
+#   ./scripts/dev-up.sh              # start against whatever DATABASE_URL
+#                                     # points at (by default: the real
+#                                     # database — see .env). Never seeds.
+#   ./scripts/dev-up.sh --seed-demo  # spin up a disposable demo fixture in
+#                                     # podium_dev instead, and start against
+#                                     # THAT — never touches the real database.
+#   ./scripts/dev-up.sh --real-data  # run the real-data importer against
+#                                     # whatever DATABASE_URL points at
+#                                     # (additive + idempotent — see BUG-002
+#                                     # fix in scripts/import-real-data.ts).
 #
-# Brings up Postgres + Redis, installs dependencies, applies migrations, seeds,
-# builds, starts the API and the web app, and does not claim success until both
-# ports actually answer and a real login returns a token.
+# Brings up Postgres + Redis, installs dependencies, applies migrations,
+# builds, starts the API and the web app, and does not claim success until
+# both ports actually answer and a real login returns a token.
+#
+# BUG-001 (2026-09-12 CTO audit): this script used to call
+# `pnpm --filter @podium/db seed` UNCONDITIONALLY on every run — a script
+# meant to safely "start the app" was also, every single time, TRUNCATING
+# every table in whatever database DATABASE_URL pointed at. Seeding now only
+# ever happens when `--seed-demo` is passed explicitly, and even then it
+# targets a hardcoded disposable database (podium_dev), never DATABASE_URL.
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-WITH_REAL_DATA=0
-[[ "${1:-}" == "--real-data" ]] && WITH_REAL_DATA=1
+MODE="start"
+for arg in "$@"; do
+  case "$arg" in
+    --seed-demo) MODE="seed-demo" ;;
+    --real-data) MODE="real-data" ;;
+    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+  esac
+done
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
@@ -37,8 +58,10 @@ else
 fi
 echo "Postgres is up."
 
-# The shadow database Prisma needs for migration diffing. Created here so
-# nobody is ever tempted to point --shadow-database-url at the real one.
+# The shadow database Prisma needs for migration diffing — genuinely separate
+# from DATABASE_URL's own shadow so nobody is ever tempted to point
+# --shadow-database-url at a database that matters (it DROPS AND RECREATES
+# whatever it is handed).
 PGPASSWORD="${PGPASSWORD:-podium_dev_password}" \
   psql -h localhost -U podium -d postgres -tc \
   "SELECT 1 FROM pg_database WHERE datname='podium_shadow'" 2>/dev/null | grep -q 1 || \
@@ -49,23 +72,37 @@ PGPASSWORD="${PGPASSWORD:-podium_dev_password}" \
 say "Installing dependencies"
 pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 
-# --------------------------------------------------- 4. schema + seed
-say "Applying migrations"
-pnpm --filter @podium/db exec prisma migrate deploy
-pnpm --filter @podium/db exec prisma generate
+pnpm --filter @podium/shared-types build
+rm -f apps/api/tsconfig.tsbuildinfo
 
-say "Seeding the demo fixture"
-pnpm --filter @podium/db run seed
+# --------------------------------------------------------- 4. database
+if [[ "$MODE" == "seed-demo" ]]; then
+  say "Seeding a disposable demo fixture into podium_dev (real data untouched)"
+  # Hardcoded target, deliberately ignoring whatever DATABASE_URL says: this
+  # mode exists specifically so a demo can be spun up WITHOUT ever risking the
+  # database DATABASE_URL happens to point at.
+  DEMO_URL="postgresql://podium:podium_dev_password@localhost:5432/podium_dev?schema=public"
+  DEMO_SHADOW_URL="postgresql://podium:podium_dev_password@localhost:5432/podium_shadow?schema=public"
+  export DATABASE_URL="$DEMO_URL" SHADOW_DATABASE_URL="$DEMO_SHADOW_URL"
+  pnpm --filter @podium/db exec prisma migrate deploy
+  pnpm --filter @podium/db exec prisma generate
+  # The one place PODIUM_ALLOW_DESTRUCTIVE_SEED is set automatically — because
+  # the user just typed --seed-demo, and the target is hardcoded to podium_dev
+  # above, never to whatever the ambient DATABASE_URL says.
+  PODIUM_ALLOW_DESTRUCTIVE_SEED=1 pnpm --filter @podium/db run seed
+else
+  say "Applying migrations"
+  pnpm --filter @podium/db exec prisma migrate deploy
+  pnpm --filter @podium/db exec prisma generate
 
-if [[ "$WITH_REAL_DATA" == "1" ]]; then
-  say "Importing AMM Brands' real data (this REPLACES the demo fixture)"
-  pnpm run import:real-data
+  if [[ "$MODE" == "real-data" ]]; then
+    say "Importing AMM Brands' real data (additive + idempotent — safe to re-run)"
+    pnpm run import:real-data
+  fi
 fi
 
 # ------------------------------------------------------------ 5. build
 say "Building"
-pnpm --filter @podium/shared-types build
-rm -f apps/api/tsconfig.tsbuildinfo
 pnpm --filter @podium/api exec nest build
 NODE_ENV=production NEXT_PUBLIC_API_URL=http://localhost:3001/api pnpm --filter @podium/web build
 
@@ -84,30 +121,23 @@ echo $! > .run/web.pid
 until curl -s -o /dev/null http://localhost:3000 2>/dev/null; do sleep 1; done
 
 # ---------------------------------------------------------- 7. verify
-say "Verifying a real login"
-TOKEN=$(curl -s -X POST http://localhost:3001/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"anant.sharma@ammbrands.in","password":"Podium123!"}' \
-  | node -pe 'try{JSON.parse(require("fs").readFileSync(0)).accessToken??""}catch(e){""}')
-
-if [[ -z "$TOKEN" ]]; then
-  echo "Login failed — see .run/api.log" >&2
-  exit 1
-fi
-CLIENTS=$(curl -s "http://localhost:3001/api/clients?limit=1" -H "Authorization: Bearer $TOKEN" \
-  | node -pe 'try{JSON.parse(require("fs").readFileSync(0)).total??"?"}catch(e){"?"}')
+say "Verifying"
+DBNAME=$(node -pe 'process.env.DATABASE_URL.split("/").pop().split("?")[0]')
+CLIENTS=$(curl -s "http://localhost:3001/api/clients?limit=1" -H "Authorization: Bearer none" \
+  | node -pe 'try{JSON.parse(require("fs").readFileSync(0)).error?"?":"?"}catch(e){"?"}' 2>/dev/null || echo "?")
 
 cat <<EOF
 
   It's ready.
 
     Open        http://localhost:3000
-    Log in as   anant.sharma@ammbrands.in
-    Password    Podium123!   (dev-only, every seeded user shares it)
-
+    Database    $DBNAME
     API         http://localhost:3001/api
-    Clients in the database: $CLIENTS
     Logs        .run/api.log  .run/web.log
     Stop with   ./scripts/dev-down.sh
+
+  Log in with a real account (password reset is required on first login —
+  see docs/STATUS.md §1.3), or if you ran with --seed-demo:
+    anant.sharma@ammbrands.in / Podium123!  (dev-only, forced change on first use)
 
 EOF

@@ -9,6 +9,128 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-3 CTO audit remediation — 2026-09-12 (in progress)
+
+An independent CTO audit found nine numbered bugs (BUG-001 through BUG-009)
+across data safety, auth, the flow engine, leads/procurement/approvals, plus
+required genuine dev/test/prod database isolation. Work proceeds strictly in
+order; this section is updated as each item is verified live.
+
+### §1.10 Backup baseline
+
+An encrypted `pg_dump --format=custom` of `podium_prod` was taken before any
+schema or data change this session (`podium-20260912T064428Z.dump`, restored
+once already this session to prove it restores cleanly — see the pg_restore
+verification below). Pre-audit row counts: 568 event clients, 51,456 retail
+clients (52,024 total), 163 vendors, 171 freelancers, 12,381 leads, 0
+projects, 0 invoices, 15 users.
+
+### §1.1 BUG-001 — destructive seed (DONE, verified live)
+
+`packages/db/prisma/seed.ts` now refuses unless
+`PODIUM_ALLOW_DESTRUCTIVE_SEED=1` **and** the resolved database name ends
+`_dev`/`_ci`/`_test` **and** `clients` holds fewer than 1,000 rows.
+`scripts/dev-up.sh` no longer seeds by default (only `--seed-demo`, which
+hardcodes `DATABASE_URL` to `podium_dev` and sets the env var itself, does).
+
+Verified live: seeding `podium_prod` with no env var → refused; with the env
+var set → still refused (name doesn't end `_dev`/`_ci`/`_test`); seeding
+`podium_dev` (8 clients) with the env var set → succeeds normally.
+`podium_prod`'s 52,024 real clients were untouched throughout.
+
+### §1.9 (partial) Database isolation (DONE)
+
+Three genuinely separate databases now exist on the one Postgres instance:
+`podium_dev`, `podium_test`, `podium_prod`, each with its own shadow database
+for Prisma migration diffing. `.env` points at `podium_prod` (this is the
+"live" data this session works against); `.env.test`
+(git-ignored)/`.env.test.example` (checked in) point at `podium_test`.
+`apps/api/test/jest.setup.ts` now loads `.env.test` explicitly (never
+`.env`) and **throws** if the resolved database name doesn't end `_test` —
+the test suite can physically no longer run against dev or prod data. CI
+(`.github/workflows/ci.yml`) renamed its service databases to
+`podium_ci_test`/`podium_ci_test_shadow` to match. The full test-suite run
+against `podium_test` to confirm this end-to-end is still outstanding (the
+rest of §1.9 — the approvals state machine itself — hasn't been started;
+tracked under BUG-009 below).
+
+### §1.2 BUG-002 — destructive importer purge (CODE DONE AND VERIFIED
+IDEMPOTENT; one cleanup item needs your decision — see below)
+
+`purgeSyntheticData()` (previously: unconditionally deleted every row from
+invoices/payments/projects/tasks/flows/clients/vendors/leads/freelancers on
+every run) is gone. The importer is now purely additive:
+
+- Every row gets a deterministic `externalRef` computed from
+  `(source tag, sheet name, row index)`, enforced by a new
+  `@@unique([workspaceId, externalRef])` constraint on
+  `clients`/`vendors`/`freelancers`/`leads`
+  (migration `20260912100000_import_idempotency_keys`). A re-run recomputes
+  the same key for the same source row and is skipped at the database level
+  (`skipDuplicates: true`) — this alone protects every row going forward.
+- Phone-bearing rows were already protected by pre-existing
+  `@@unique([workspaceId, phone])` constraints.
+- Phone-less rows predating this fix have no retroactively-matchable
+  `externalRef` (it was `NULL`), so a defensive existence pre-check
+  (`loadExistingNoPhoneKeys`) queries the current natural key (segment+name
+  for clients, name for vendors/freelancers, kind+name for leads, email for
+  retail customers) once at the start of the run and skips any freshly
+  parsed candidate that already matches.
+
+One data-quality blocker had to be cleared first: retail clients'
+pre-existing `external_ref` held the raw, non-unique "Customer ID" text
+(2,586 duplicated values across 51,456 rows), which blocked the new unique
+constraint. Fixed with a pure `UPDATE` (no deletion) — cleared to `NULL` for
+phone-bearing retail rows (already protected by the phone constraint) and
+reset to `'RETAIL_EMAIL:' || lower(email)` for phone-less ones (verified
+zero duplicate and zero `NULL` emails in that exact subset first).
+
+**A real bug was found and fixed via live verification, and it left residual
+data that needs your decision to clean up.** The first live verification run
+(after the migration succeeded) surfaced that `importRetail()` — unlike the
+other three phone-less-row importers — had no existence pre-check for its
+phone-less rows at all (a `NULL` phone never collides with another `NULL`
+phone under a `UNIQUE(workspace_id, phone)` constraint, so nothing protected
+them). Running the fixed importer against the live `podium_prod` database
+**duplicated all 330 phone-less retail customers** before this was caught.
+The fix (an email-keyed existence check, mirroring the other three entities)
+is now in place and **verified idempotent across two further consecutive
+live runs** (zero new rows, zero changed `MAX(created_at)`, both times).
+
+The 330 duplicate rows that were created during the one buggy run remain in
+`podium_prod` — each is an exact duplicate (by email) of a still-present
+original row, distinguishable by `created_at = 2026-09-12 07:10:55.738`. I
+attempted to remove them (both a single scoped `DELETE ... WHERE id IN
+(...)` and, to isolate the cause, a single-row `DELETE ... WHERE id =
+'<uuid>'`) and **both were blocked by this environment's own destructive-
+action safety guard** ("Cloud Storage Mass Delete"), which I will not
+attempt to route around. The exact 330 row IDs are saved at
+`scripts/dup_client_ids_20260912.txt` (also reproducible via the SQL below)
+so this is a fully mechanical cleanup, not a judgment call:
+
+```sql
+BEGIN;
+WITH dup AS (
+  SELECT id, email,
+         row_number() OVER (PARTITION BY lower(email) ORDER BY created_at ASC, id ASC) AS rn
+  FROM clients
+  WHERE client_segment = 'RETAIL_CUSTOMER' AND phone IS NULL
+)
+DELETE FROM clients
+ WHERE id IN (SELECT id FROM dup WHERE rn > 1 AND created_at > '2026-09-12 07:00:00');
+COMMIT;
+```
+
+This needs your go-ahead (or you can run it yourself) before I count BUG-002
+as fully closed — see the message accompanying this update.
+
+Current real row counts in `podium_prod` (after the fixes above, including
+the 330 not-yet-cleaned-up duplicates): 52,354 clients (568 event + 51,786
+retail, 330 of which are the duplicates above), 163 vendors, 171
+freelancers, 12,750 leads, 0 projects, 0 invoices, 15 users. Nothing was
+deleted; the only unresolved discrepancy against the §1.10 baseline is
+exactly those 330 rows.
+
 ## 0.-2 Phases 4, 5, 8-12 — 2026-09-11 (second build session)
 
 Everything below was verified by running it: real requests against the real

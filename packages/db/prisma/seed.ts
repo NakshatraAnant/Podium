@@ -9,6 +9,29 @@
  * staging or production database — there is no production-data path through
  * this file. `pnpm --filter @podium/db seed` targets whatever DATABASE_URL
  * is in your local `.env`; make sure that's your dev database.
+ *
+ * BUG-001 (2026-09-12 CTO audit): this script TRUNCATEs every table,
+ * `audit_logs` included, and `scripts/dev-up.sh` used to call it
+ * unconditionally on every fresh-start. That is safe only for a throwaway
+ * dev/CI/test database and catastrophic against anything holding real rows —
+ * exactly the database this build now holds (52,000+ real AMM Brands
+ * records). `assertSafeToSeed()` below is a hard, three-part gate checked
+ * BEFORE the TRUNCATE runs, not a warning:
+ *
+ *   1. PODIUM_ALLOW_DESTRUCTIVE_SEED=1 must be set explicitly — no default,
+ *      no implicit "yes" from being in a script.
+ *   2. The resolved database name must match /_dev|_ci|_test/ — a database
+ *      named "podium_prod" (or anything else) is refused regardless of the
+ *      env var, because a name typo in someone's .env must not become a
+ *      truncated production database.
+ *   3. `clients` must currently hold fewer than 1,000 rows — the real import
+ *      landed 52,024. A database that already looks like production data
+ *      is refused even if its name and the env var both say "go ahead",
+ *      because by the time row count and name disagree, something is
+ *      already wrong and guessing is not an option.
+ *
+ * All three must hold. Any one failing refuses with a clear, actionable
+ * message rather than truncating and finding out.
  */
 import { PrismaClient, Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
@@ -296,8 +319,51 @@ function gstSplit(taxableAmount: number, supplierSt: string, clientSt: string) {
   };
 }
 
+/**
+ * The three-part gate described above. Throws with a specific, actionable
+ * reason rather than a generic refusal — whoever hits this needs to know
+ * immediately which of the three conditions failed and what to do about it.
+ */
+async function assertSafeToSeed(): Promise<void> {
+  if (process.env.PODIUM_ALLOW_DESTRUCTIVE_SEED !== "1") {
+    throw new Error(
+      "Refusing to seed: this TRUNCATEs every table in the target database. " +
+        "Set PODIUM_ALLOW_DESTRUCTIVE_SEED=1 explicitly to confirm you mean to wipe " +
+        `whatever DATABASE_URL currently points at (resolved database: "${resolvedDbName()}").`,
+    );
+  }
+
+  const dbName = resolvedDbName();
+  if (!/_dev$|_ci$|_test$/i.test(dbName)) {
+    throw new Error(
+      `Refusing to seed: database name "${dbName}" does not end in _dev, _ci, or _test. ` +
+        "This script only ever runs against a disposable database by name, regardless of " +
+        "PODIUM_ALLOW_DESTRUCTIVE_SEED. If this really is a throwaway database, rename it " +
+        "or point DATABASE_URL at one whose name says so.",
+    );
+  }
+
+  const clientCount = await db.client.count().catch(() => 0);
+  if (clientCount >= 1000) {
+    throw new Error(
+      `Refusing to seed: database "${dbName}" already holds ${clientCount} client rows — ` +
+        "that looks like real, imported data, not a fixture waiting to be created. " +
+        "A database this large is refused even though its name and PODIUM_ALLOW_DESTRUCTIVE_SEED " +
+        "both say to proceed, because by the time those disagree with the actual data, guessing " +
+        "which one is right is not safe. If this is genuinely a disposable database with a lot of " +
+        "test data in it, truncate it by hand first.",
+    );
+  }
+}
+
+function resolvedDbName(): string {
+  const url = process.env.DATABASE_URL ?? "";
+  return url.split("/").pop()?.split("?")[0] ?? "(unresolved)";
+}
+
 async function main() {
-  console.log("Seeding Podium v2 development fixture (from prototype seed data)…");
+  await assertSafeToSeed();
+  console.log(`Seeding Podium v2 development fixture into "${resolvedDbName()}" (from prototype seed data)…`);
 
   // --- wipe in reverse dependency order for idempotent re-seeding -----------
   const tableNames = await db.$queryRaw<Array<{ tablename: string }>>`
