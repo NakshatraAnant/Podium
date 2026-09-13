@@ -9,6 +9,174 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-11 LOCAL DEVELOPMENT — made to actually work, from a clean clone (2026-09-13)
+
+**OBJECTIVE:** close the two open items left by Phase I (CI trigger scope,
+proactive `/auth/refresh`), then make local development genuinely work —
+not asserted, but followed literally from a fresh clone until it did, and
+then proved twice from a clean state.
+
+### Part 1 — the two open items
+
+*CI now runs automatically on `claude/**` pushes.* CI previously only
+triggered on `main`, so every session branch needed a manual
+`workflow_dispatch` — which is exactly how three latent `ci.yml` defects
+survived until Phase H triggered the first real run. Verified by pushing
+and watching it fire, not by reading the YAML: runs 7–11 on this branch
+are all `event: push`, all automatic.
+
+*Sessions no longer die at 15 minutes.* Nothing ever called
+`/auth/refresh`, so an active user was thrown back to the login screen
+mid-task every `JWT_ACCESS_TTL`. Two halves, because either alone is
+insufficient:
+- **Proactive** (`lib/auth.tsx`): refresh every 10 minutes, but only while
+  there has been real user activity in the last 10. The activity gate is
+  what keeps "an inactive session still expires" true — a tab left open
+  overnight sees no pointer or key events, stops refreshing, and lapses as
+  designed. This keeps sessions alive for people, not for idle tabs.
+- **Reactive** (`lib/api.ts`): retry a 401 exactly once behind a refresh.
+  Browsers throttle timers hard in background tabs and stop them entirely
+  while a laptop sleeps, so no timer tuning can prevent an expired token
+  on wake; refreshing and replaying turns that into something the user
+  never sees. Every caller shares one in-flight refresh — refresh
+  *rotates* the token, so six concurrent queries firing six refreshes
+  would have five of them present an already-revoked token and fail,
+  logging out a user for being busy. A new e2e test pins that rotation
+  semantics, so the reason for the dedup can't quietly disappear.
+
+**Staging deployment was deliberately not touched**, per instruction: no
+target, provider, or credentials exist, and standing one up spends real
+money on a decision that is Anant's alone.
+
+### Part 2 — local development
+
+Root-caused by cloning the repo fresh and running the README's own steps
+literally, in order, without skipping anything "known to work". **Six
+real failures**, all of them things a new engineer hits on day one:
+
+| # | Documented step | What actually happened | Root cause |
+|---|---|---|---|
+| 1 | `pnpm --filter @podium/db migrate` | `P1012 Environment variable not found: DATABASE_URL` | Root `.env` never loaded — see below |
+| 2 | same | Hung forever on `Enter a name for the new migration` | `migrate dev` is an *authoring* command, and `budgets.updated_at` had drifted from the committed migrations, so it wanted to write a new one |
+| 3 | `pnpm --filter @podium/db seed` | `Refusing to seed … (resolved database: "")` | Undocumented `PODIUM_ALLOW_DESTRUCTIVE_SEED=1`, **and** no `DATABASE_URL` |
+| 4 | `pnpm dev:api` | `Cannot find module '@podium/shared-types'` — the API could not compile at all | The documented setup never built it; it resolves to `dist/`, absent in a fresh clone. CI has always built it explicitly |
+| 5 | `pnpm dev:api` (after fixing 4) | `Cannot find module '../common/decorators/...'` | The failed compile left a partial `apps/api/dist`; the incremental rebuild considered it current |
+| 6 | `pnpm test` | Died before running a single real test | `packages/db` has no test files and `vitest` exits 1 |
+
+Failures 1, 3 and 4's sibling symptom (`Configuration key
+"JWT_ACCESS_SECRET" does not exist`) are **one root cause**: nothing
+loaded the monorepo-root `.env` when a script ran from a package
+subdirectory — which every documented command does, because `pnpm
+--filter` sets cwd to the package. Prisma only auto-loads `.env` from its
+own cwd; `ConfigModule.forRoot()` defaults to `process.cwd()`. All three
+errors therefore read like a missing or mistyped *value*, when the truth
+was a file nobody ever opened. That misdirection is why this survived so
+long: every error pointed at the wrong thing.
+
+**Fixed at the source, not papered over:**
+- `apps/api` resolves `.env` from its own file location (repo root,
+  correct from both `src/` and `dist/`), with cwd-relative kept as a
+  fallback. Real process env still wins, so CI and containers are
+  unaffected.
+- `packages/db` runs every Prisma/seed command through
+  `scripts/with-root-env.cjs`, which loads the root `.env` and **never**
+  clobbers an already-set variable — CI sets them directly and has no
+  `.env` file at all.
+- Added the migration closing the `budgets.updated_at` drift, so the
+  migrations now reproduce `schema.prisma` exactly (`migrate diff` is
+  empty) and `migrate dev` no longer prompts.
+- Added `pnpm bootstrap` — build shared packages, generate the Prisma
+  client, apply migrations — as one ordered step, and `migrate deploy`
+  (never interactive) for setup.
+- `packages/db` test script now `--passWithNoTests`.
+- Added `GET /api/health` (public, and it checks the database rather than
+  just returning 200 — a process that booted but can't reach Postgres is
+  up in no sense that matters), because local setup had no way to answer
+  "is the API actually up?" short of reading a 401 as good news.
+- README's Local development section rewritten to match reality, plus a
+  no-Docker path, test-database setup, and a troubleshooting table of
+  every failure above.
+
+**A seventh failure, found in the fix itself:** the first draft named the
+new script `setup`. `pnpm setup` is a *built-in pnpm command* — it
+configures pnpm's home directory, shadowed the script entirely, printed
+unrelated output and **exited 0**. A silent success that builds nothing.
+Caught only because the corrected README was followed literally rather
+than assumed to work; renamed to `bootstrap` and documented as its own
+troubleshooting row.
+
+### What you actually ran
+
+- **The documented sequence, from a fresh `git clone`, twice**, each time
+  against genuinely empty databases (`podium_dev` and `podium_shadow`
+  dropped and recreated; verified 0 tables before starting) and a fresh
+  `node_modules`. Both runs: install → `.env` → `bootstrap` (11
+  migrations applied) → seed (15 users, 11 projects, 10 invoices, 8
+  vendors) → both servers up → `GET /api/health` returning
+  `{"status":"ok","database":"up"}`.
+- **A real browser walkthrough on each run** (`scripts/verify-local-dev.mjs`,
+  committed): login → dashboard (real project cards) → invoices (10 rows)
+  → vendors (8) → automation (11 rules) → projects (11) → an invoice
+  detail page showing its totals → a project's budget tab. Asserted on
+  *rendered rows*, not on "the page loaded" — a screen that renders its
+  shell but no data fails this. Zero uncaught page errors. Both runs:
+  ALL CHECKS PASSED, with different row UUIDs each time, confirming the
+  databases really were rebuilt rather than reused.
+- Full API e2e suite: 27 suites / **197 tests** passing (194 before this
+  pass, plus 2 health and 1 refresh-rotation).
+- Session keep-alive, both halves, in a real browser:
+  - short-TTL run (`JWT_ACCESS_TTL=20s`): session survived expiry,
+    `/auth/refresh` was actually called, no 401 left unrecovered — this
+    exercises the **reactive** path.
+  - **17-minute active-user soak against the real 15-minute TTL**
+    (`SOAK_MINUTES=17`, activity every 30s, requiring *zero* 401s rather
+    than merely recovered ones): still running when this section was
+    committed — verified beforehand that the API under test issues real
+    900-second tokens, so the soak genuinely crosses the expiry
+    boundary. Result recorded in the follow-up commit rather than
+    asserted here.
+- CI: runs 7–11 on this branch, all automatically triggered by push.
+
+### What's still not done
+
+- **Docker Compose could not be executed in this build sandbox.** Not a
+  codebase problem and not a guess: `docker compose up -d` fails pulling
+  `postgres:16-alpine` with `Forbidden` from
+  `production.cloudfront.docker.com`, and the sandbox's own egress proxy
+  independently reports `connect_rejected — gateway answered 403 to
+  CONNECT (policy denial)` for that host. The daemon itself runs fine
+  (started manually and verified). The compose file is unchanged and is
+  the same one CI pulls successfully on GitHub runners. Everything from
+  step 3 onward was executed exactly as documented, against Postgres 16
+  and Redis 7 running natively on the same ports with the same
+  credentials — so what was *not* verified here is precisely the two
+  Docker-specific commands (`docker compose up -d`, and the
+  `docker compose exec … createdb` alternative offered for the test
+  database), and nothing downstream of them.
+- Staging deployment — untouched by instruction, still Anant's call.
+
+### Assumptions / judgment calls
+
+- The seed's `PODIUM_ALLOW_DESTRUCTIVE_SEED=1` confirmation is
+  **documented, not automated**. Wrapping it into the script would have
+  made setup one command shorter and silently defeated a guard that
+  exists to stop exactly that. The friction is the feature.
+- Refresh cadence (10 min against a 15 min TTL) is a fixed constant, not
+  derived from the token: the token is httpOnly and unreadable by design,
+  and guessing from a hardcoded TTL someone later lowers would be worse
+  than useless. The retry-on-401 is what makes any mismatch safe — which
+  the short-TTL run demonstrates directly.
+
+### Known issues
+
+None outstanding from this pass.
+
+### Next step
+
+Nothing is blocked on further investigation. The open decisions remain
+staging deployment (needs a provider and a budget) and whether any of the
+deliberately-deferred screens in Phase I should now be built.
+
 ## 0.-10 PHASE I — Full frontend completion pass (2026-09-13)
 
 **OBJECTIVE:** audit `apps/web/app` against every backend module and

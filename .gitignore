@@ -38,6 +38,8 @@ Thumbs.db
 
 # Local storage stub (dev file-storage backend)
 .local-storage/
+# screenshots written by scripts/verify-local-dev.mjs
+.local-verify/
 
 # Turbo / cache
 .turbo/
