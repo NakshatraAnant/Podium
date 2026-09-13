@@ -3,7 +3,7 @@
 import type { AuthTokens } from "@podium/shared-types";
 import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, refreshSession } from "./api";
+import { api, readRefreshClock, refreshSession, writeRefreshClock } from "./api";
 
 type CurrentUser = AuthTokens["user"];
 
@@ -31,6 +31,7 @@ const REFRESH_EVERY_MS = 10 * 60 * 1000;
 const ACTIVE_WITHIN_MS = 10 * 60 * 1000;
 const TICK_MS = 60 * 1000;
 const ACTIVITY_EVENTS = ["pointerdown", "keydown", "scroll", "focus"] as const;
+
 
 interface AuthContextValue {
   user: CurrentUser | null;
@@ -71,6 +72,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) return;
 
+    // Continue the clock from wherever the last page load left it rather
+    // than restarting it: a full navigation remounts this provider, and
+    // resetting here meant the 10-minute countdown never completed for
+    // anyone reloading more often than that (see lib/api.ts's
+    // REFRESH_CLOCK_KEY for the soak that caught it).
+    lastRefreshAt.current = readRefreshClock();
+
     const noteActivity = () => {
       lastActivityAt.current = Date.now();
     };
@@ -108,6 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // for longer than a refresh interval before signing in.
       lastActivityAt.current = Date.now();
       lastRefreshAt.current = Date.now();
+      writeRefreshClock();
       setUser(res.user);
       router.push("/dashboard");
     },

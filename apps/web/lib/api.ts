@@ -21,6 +21,45 @@ export class ApiError extends Error {
 let refreshInFlight: Promise<boolean> | null = null;
 
 /**
+ * When the session was last refreshed, persisted across page loads.
+ *
+ * A full page load remounts AuthProvider and resets its refs — so with
+ * this held only in memory, the keep-alive's 10-minute clock restarted on
+ * every hard navigation and, for anyone reloading more often than that,
+ * never reached 10 minutes at all. A 17-minute soak caught exactly this:
+ * the user stayed signed in, but only because the token lapsed and the
+ * retry-on-401 below quietly rescued it — the proactive half was doing
+ * nothing.
+ *
+ * The token's real age is the right thing to key on, but it's httpOnly
+ * and unreadable by design, so this timestamp stands in for it. It is not
+ * a credential: it grants nothing and reintroduces none of the XSS
+ * exposure that moving tokens out of localStorage closed. Every access is
+ * guarded — storage throws in some privacy modes, and a keep-alive is not
+ * worth breaking the app over.
+ */
+const REFRESH_CLOCK_KEY = "podium.lastRefreshAt";
+
+export function readRefreshClock(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(REFRESH_CLOCK_KEY));
+    // Absent or corrupt means "assume just refreshed" — retry-on-401
+    // covers us if that assumption turns out to be wrong.
+    return Number.isFinite(stored) && stored > 0 ? stored : Date.now();
+  } catch {
+    return Date.now();
+  }
+}
+
+export function writeRefreshClock(at: number = Date.now()): void {
+  try {
+    window.localStorage.setItem(REFRESH_CLOCK_KEY, String(at));
+  } catch {
+    /* storage unavailable — the timer still works within this page's life */
+  }
+}
+
+/**
  * Trades the httpOnly refresh cookie for a fresh access cookie. Sends an
  * empty body deliberately: the browser cannot read an httpOnly value back
  * out to put it in the body, which is exactly why the API accepts the
@@ -36,7 +75,12 @@ export async function refreshSession(): Promise<boolean> {
       headers: { "Content-Type": "application/json" },
       body: "{}",
     })
-      .then((res) => res.ok)
+      .then((res) => {
+        // Whoever triggered it — the timer or a 401 — the session is fresh
+        // as of now, so the keep-alive clock restarts from here.
+        if (res.ok) writeRefreshClock();
+        return res.ok;
+      })
       .catch(() => false)
       .finally(() => {
         refreshInFlight = null;
