@@ -22,10 +22,25 @@
  *   JWT_ACCESS_TTL=20s pnpm dev:api
  *   SESSION_TTL_SECONDS=20 node scripts/verify-session-refresh.mjs
  *
+ * The two modes prove different halves, and both matter:
+ *
+ *   (default, idle)  Sit still past the TTL, then act. The proactive timer
+ *                    deliberately does NOT fire for an idle session, so this
+ *                    exercises the retry-on-401 recovery in lib/api.ts.
+ *
+ *   SOAK_MINUTES=17  Behave like someone actually working — activity every
+ *                    30s for longer than the real 15-minute TTL. Here the
+ *                    proactive timer is what keeps the session alive, so the
+ *                    bar is higher: zero 401s may occur at all, because the
+ *                    token should never be allowed to lapse in the first
+ *                    place. This is the "left the app open and kept working"
+ *                    case that used to end in a forced re-login.
+ *
  * Env:
  *   WEB_URL               default http://localhost:3000
  *   EMAIL / PASSWORD      default the seeded Founder / dev password
- *   SESSION_TTL_SECONDS   how long to idle past, default 20
+ *   SESSION_TTL_SECONDS   how long to idle past, default 20 (idle mode)
+ *   SOAK_MINUTES          run the active-user soak instead, for this long
  */
 import { chromium } from "playwright";
 
@@ -60,6 +75,44 @@ await page.waitForURL("**/dashboard", { timeout: 15000 });
 check("logs in and lands on the dashboard", page.url().includes("/dashboard"), page.url());
 
 const callsBefore = apiCalls.length;
+
+const soakMinutes = Number(process.env.SOAK_MINUTES ?? 0);
+if (soakMinutes > 0) {
+  // Active-user soak: real activity every 30s for longer than the token's
+  // real lifetime. The proactive timer should keep the session alive the
+  // whole way, so a single 401 anywhere is a failure — not something to be
+  // recovered from, something that should never have happened.
+  const until = Date.now() + soakMinutes * 60 * 1000;
+  console.log(`\nsoaking ${soakMinutes} minutes as an active user…`);
+  let laps = 0;
+  while (Date.now() < until) {
+    await page.waitForTimeout(30_000);
+    await page.mouse.move(300 + (laps % 40), 300);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.keyboard.press("Shift");
+    laps += 1;
+    if (laps % 4 === 0) {
+      // Periodically fetch real data, so "still logged in" is continuously
+      // observed rather than only checked at the end.
+      await page.goto(`${WEB_URL}${laps % 8 === 0 ? "/projects" : "/vendors"}`, { waitUntil: "networkidle" });
+      const elapsed = Math.round((soakMinutes * 60 * 1000 - (until - Date.now())) / 60000);
+      console.log(`  ~${elapsed}m: ${page.url().includes("/login") ? "LOGGED OUT" : "still signed in"}`);
+    }
+  }
+
+  const soakCalls = apiCalls.slice(callsBefore);
+  const refreshes = soakCalls.filter((c) => c.path === "/api/auth/refresh" && c.status < 400).length;
+  const unauthorized = soakCalls.filter((c) => c.status === 401);
+
+  check("still signed in after the full soak", !page.url().includes("/login"), page.url());
+  check("the proactive timer refreshed the session", refreshes > 0, `${refreshes} refresh call(s)`);
+  check("not a single request failed with 401", unauthorized.length === 0, JSON.stringify(unauthorized));
+
+  await browser.close();
+  console.log(`\n${failures.length === 0 ? "ALL CHECKS PASSED" : `FAILED: ${failures.join(", ")}`}`);
+  process.exit(failures.length === 0 ? 0 : 1);
+}
 
 // Idle past the access token's lifetime, then act as a working user would.
 // The pointer events also keep the activity gate satisfied, which is what
