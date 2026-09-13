@@ -11,6 +11,12 @@ import { InventoryService } from "./inventory.service";
 export class InventoryController {
   constructor(private readonly inventory: InventoryService) {}
 
+  @Get("items")
+  @RequirePermissions("inventory:view")
+  items(@CurrentUser() user: RequestUser) {
+    return this.inventory.listItems(user);
+  }
+
   @Get("balances")
   @RequirePermissions("inventory:view")
   balances(@CurrentUser() user: RequestUser, @Query("cityId") cityId?: string) {

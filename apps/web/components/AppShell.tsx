@@ -20,6 +20,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
       { href: "/projects", icon: "◧", label: "Projects" },
       { href: "/tasks", icon: "☑", label: "Tasks" },
       { href: "/risks", icon: "⚠", label: "Risks & Issues" },
+      { href: "/playbooks", icon: "❧", label: "Playbooks" },
     ],
   },
   {
@@ -27,6 +28,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
     items: [
       { href: "/inventory", icon: "▣", label: "Inventory" },
       { href: "/procurement", icon: "⛁", label: "Procurement" },
+      { href: "/menu", icon: "☕", label: "Menu Costing" },
     ],
   },
   {

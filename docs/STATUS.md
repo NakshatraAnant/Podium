@@ -9,6 +9,139 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-6 PHASE E — Playbooks CRUD, Deal-Won wiring, Menu costing (2026-09-12)
+
+**OBJECTIVE:** Build Playbooks as a real CRUD module (they existed only as a
+schema table with zero API surface); wire a chosen playbook's defaults into
+Deal-Won conversion, which previously created the project shell but
+explicitly left "task/flow generation from playbook defaults" unwired; build
+Menu Costing (Recipes) as a real CRUD module with server-computed cost/margin.
+
+**Scope note, stated up front:** there is no CRM/Pipeline frontend in this
+codebase at all — Phase 2 built only its backend (`crm/leads.service.ts`
+etc.); no `/leads` or `/pipeline` page exists anywhere in `apps/web`.
+Phase E's brief was "Deal-Won wiring," which I read as the backend wiring
+(a playbook's defaults actually creating tasks/flows on conversion) —
+building a full CRM pipeline UI from scratch was not in Phase E's stated
+scope and would be a large, separate undertaking. Deal-Won wiring is
+therefore verified via the e2e suite and a live curl-driven conversion
+against `podium_dev` (below), not a browser UI, because there is no UI to
+click through yet. Flagging this gap explicitly for Phase I rather than
+letting it pass unmentioned.
+
+**WHAT CHANGED:**
+
+*Playbooks (new module):* `packages/shared-types/src/playbooks.ts`
+(`createPlaybookSchema`/`updatePlaybookSchema`, a `defaultTasks` item shape
+of `{name, dueOffsetDays?}`), `apps/api/src/playbooks/*` (list/get/create/
+update/soft-delete, validates `defaultFlowTemplateIds` against real
+`flow_templates` rows), `apps/web/app/playbooks/page.tsx` (list + inline
+create/edit editor: name/eventType/stages/tasks/flow-template checkboxes).
+`defaultStages` is stored and displayed but intentionally NOT wired to any
+automated `Project.status` transition — informational only, documented
+inline in the shared-types file.
+
+*Deal-Won wiring:* `LeadsService.convert()` now calls a new
+`applyPlaybookDefaults()` after its transaction commits (same "fire after
+commit, never roll back the write that already succeeded" convention
+`updateStage()` already uses for `automation.emit()`): for a project created
+with a `playbookId`, it creates one `Task` per `defaultTasks` entry (due
+date = event date minus `dueOffsetDays`, when given) and instantiates one
+flow per `defaultFlowTemplateIds` entry via the existing `FlowsService.
+instantiate()` (imported into `CrmModule`), passing `ownerOverrides` that
+map every step key to the converting PM.
+
+*Menu costing (new module):* `packages/shared-types/src/recipes.ts`,
+`apps/api/src/recipes/*` — cost is computed fresh on every read from real
+`inventory_items.standard_cost`/`size_ml` (`qtyMl * (standardCost /
+sizeMl)` per ingredient, summed, plus `garnishCost`), never stored; a SKU
+with no `sizeMl` (glassware, equipment — sold by the piece, not the ml) is
+flagged `costable: false` on its line and the whole recipe as
+`allCostable: false` rather than silently producing a wrong number.
+Added `GET /inventory/items` (the full SKU catalog — `listBalances()`
+only returns items that already have a balance row somewhere, which
+excludes a SKU that's never been received into stock, so it was the wrong
+source for this picker). `apps/web/app/menu/page.tsx` — list with cost/
+margin columns, create/edit editor with a live client-side cost *preview*
+while typing (explicitly labeled as a preview; the server recomputes from
+scratch on save and on every read).
+
+*RBAC:* added "playbooks" and "recipes" as new resources in
+`packages/db/prisma/seed.ts` (affects fresh dev/test seeds only). Since
+neither `podium_prod` nor the already-seeded `podium_dev`/`podium_test`
+pick up a RESOURCES change without a reseed — and the seed guard correctly
+forbids reseeding `podium_prod` outright — wrote a small standalone,
+additive, idempotent script, `scripts/backfill-phase-e-permissions.ts`
+(checks existence before every insert; a second run creates 0 new rows,
+verified). Ran it against all three databases.
+
+*Frontend:* `apps/web/lib/api.ts` gained an `api.delete()` — didn't exist
+before (no screen had ever needed to call a DELETE route; `budgets:delete`
+and now `playbooks:delete`/`recipes:delete` are the first frontend callers).
+`AppShell.tsx` gained "Playbooks" (Operations group) and "Menu Costing"
+(Bar & stock group) nav entries.
+
+### OPEN DECISION, defaulted conservatively — needs Anant's confirmation
+
+Every task and every flow step `applyPlaybookDefaults()` creates is owned
+by the converting PM — never routed by role. Reasoning: `defaultTasks` has
+no per-task owner field, and a brand-new project has no crew roster yet
+beyond the PM to route anything else to. The PM reassigning tasks/flow
+steps afterward is already-existing, already-tested functionality — the
+fallback if this default is wrong for a real playbook. Also scoped
+conservatively: `recipes:*` was granted to Founder/Admin (full) and
+Operations (full, since menu costing is bar-ops' job) only — not to
+Finance, even though margin visibility is arguably finance-relevant; easy
+to add later if actually wanted, not assumed here.
+
+### What you actually ran
+
+- `pnpm --filter @podium/shared-types exec tsc --noEmit`, `--filter
+  @podium/api`, `--filter @podium/web` — all three clean (exit 0).
+- Full e2e suite: 20 suites / 160 tests (15 new: 6 playbooks, 6 recipes, 3
+  Deal-Won-wiring), run twice consecutively against `podium_test` with no
+  reseed — 160/160 both times.
+- `scripts/backfill-phase-e-permissions.ts` run against `podium_dev` (31
+  rows created, then 0 on a second run), `podium_test` (31 created), and
+  `podium_prod` (31 created, confirmed via `role_permissions` count
+  384→415, then 0 on a second run — idempotent).
+- Live verification against `podium_dev`: Playwright drove a real Chromium
+  browser through create/edit/delete on `/playbooks` and create on `/menu`
+  (screenshots taken; the created recipe's displayed margin, 34.1%, matches
+  the hand-computed expected value from the real seeded SKU costs exactly).
+  Deal-Won wiring has no UI to drive yet (see scope note above), so it was
+  verified with a real curl-driven conversion: created a playbook with one
+  task (`dueOffsetDays: 30`) and one flow template, converted a fresh lead
+  against it, then queried the resulting project directly — the task exists
+  with the correct owner and a due date exactly 30 days before the chosen
+  event date, and the flow instance exists with all 7 of its template's
+  steps, every one owned by the PM, first step READY and the rest LOCKED
+  (a correctly-instantiated flow).
+- `podium_prod` re-checked after every step: 52,024 clients / 15 users
+  unchanged throughout; `role_permissions` grew only by the expected +31.
+
+### What's still not done
+
+- No CRM/Pipeline frontend exists (see scope note above) — this is the
+  main gap Phase E surfaces. Recommended for Phase I or its own follow-up:
+  a `/leads` board plus the conversion form, which is also where a
+  playbook picker naturally belongs in the UI (today a playbook can only be
+  attached to a conversion via the API directly).
+- No Playwright suite persisted for Phase E's UI (same one-off scripted
+  verification pattern as Phases A-D, not a new CI-tracked layer).
+- `defaultStages` has no UI beyond display/edit — no screen visualizes a
+  project's current position along its playbook's stages, since Project
+  status is a separate, independent field (documented, not an oversight).
+
+### Known issues
+
+None found this phase — no self-correcting sub-phase was needed.
+
+### Next step
+
+Continuing into Phase F (Documents upload, storage driver, versioning, UI)
+per the standing instruction.
+
 ## 0.-5 PHASE D — Procurement + Event Day frontend (2026-09-12)
 
 Both backends (procurement: PR→approval→PO→GRN; event day: runsheet/

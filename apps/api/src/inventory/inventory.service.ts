@@ -32,6 +32,21 @@ export class InventoryService {
     private readonly cityScope: CityScopeService,
   ) {}
 
+  /**
+   * The full SKU catalog — unlike listBalances(), not filtered to items that
+   * happen to have a balance row somewhere. Recipes (Phase E) need to
+   * reference a SKU (e.g. a newly added garnish) before it has ever been
+   * received into stock anywhere, so balances is the wrong source for that
+   * picker. Not city-scoped: InventoryItem is a workspace-level catalog
+   * entry, not tied to any one location.
+   */
+  listItems(user: RequestUser) {
+    return this.prisma.client.inventoryItem.findMany({
+      where: { workspaceId: user.workspaceId, deletedAt: null },
+      orderBy: { name: "asc" },
+    });
+  }
+
   async listBalances(user: RequestUser, cityId?: string) {
     // scopeFilter() returns a filter shaped for a model with its own
     // `cityId` column (e.g. `{ cityId: { in: [...] } }`) -- InventoryLocation

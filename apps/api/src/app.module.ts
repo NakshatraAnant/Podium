@@ -24,7 +24,9 @@ import { InvoicesModule } from "./invoices/invoices.module";
 import { GoogleModule } from "./google/google.module";
 import { AutomationModule } from "./automation/automation.module";
 import { EventDayModule } from "./eventday/eventday.module";
+import { PlaybooksModule } from "./playbooks/playbooks.module";
 import { ProcurementModule } from "./procurement/procurement.module";
+import { RecipesModule } from "./recipes/recipes.module";
 import { ReportsModule } from "./reports/reports.module";
 import { ProjectsModule } from "./projects/projects.module";
 import { TasksModule } from "./tasks/tasks.module";
@@ -57,6 +59,8 @@ import { VendorsModule } from "./vendors/vendors.module";
     GovernanceModule,
     InventoryModule,
     InvoicesModule,
+    PlaybooksModule,
+    RecipesModule,
     VendorsModule,
   ],
   providers: [

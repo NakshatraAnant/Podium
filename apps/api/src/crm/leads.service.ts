@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import type { ConvertLeadInput, CreateLeadInput } from "@podium/shared-types";
+import type { ConvertLeadInput, CreateLeadInput, PlaybookTaskInput } from "@podium/shared-types";
 import { AutomationService } from "../automation/automation.service";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
+import { FlowsService } from "../flows/flows.service";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 500;
@@ -24,6 +25,7 @@ export class LeadsService {
     private readonly prisma: PrismaService,
     private readonly cityScope: CityScopeService,
     private readonly automation: AutomationService,
+    private readonly flows: FlowsService,
   ) {}
 
   /**
@@ -86,10 +88,13 @@ export class LeadsService {
    * Automation au1, "Deal Won -> Project Auto-Creation" (blueprint §5A):
    * marks the lead Won, creates (or reuses) the client, creates the project,
    * and creates its chat channel — atomically, so a failure partway through
-   * never leaves a Won lead with no project. Task/flow generation "from
-   * playbook defaults" is left to Phase 3's flow/task modules to wire once
-   * a template is chosen; this endpoint sets up the project shell those
-   * hang off.
+   * never leaves a Won lead with no project. If a playbook was chosen,
+   * Phase E applies its defaults (tasks + flow instances) as a follow-up
+   * step after this transaction commits — same "never roll back the write
+   * that already succeeded" convention as updateStage()'s automation.emit()
+   * below: a playbook-application failure surfaces to the caller as an
+   * error, but the project/client/channel it should have decorated already
+   * exists and is usable.
    */
   async convert(user: RequestUser, id: string, input: ConvertLeadInput) {
     const lead = await this.prisma.client.lead.findFirst({ where: { id, workspaceId: user.workspaceId, deletedAt: null } });
@@ -112,7 +117,7 @@ export class LeadsService {
       throw new BadRequestException("This lead has no estimated value — pass value to set the project's revenue.");
     }
 
-    return this.prisma.client.$transaction(async (tx) => {
+    const result = await this.prisma.client.$transaction(async (tx) => {
       const client = input.clientId
         ? await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
         : await tx.client.create({
@@ -166,6 +171,48 @@ export class LeadsService {
 
       return { lead: wonLead, client, project };
     });
+
+    if (result.project.playbookId) {
+      await this.applyPlaybookDefaults(user, result.project.id, result.project.playbookId, result.project.eventDate, input.pmId);
+    }
+    return result;
+  }
+
+  /**
+   * OPEN DECISION, defaulted conservatively — needs Anant's confirmation:
+   * every task and every flow step this creates is owned by the project's
+   * PM, never split by role. The playbook's defaultTasks have no per-task
+   * owner field, and a brand-new project has no crew roster yet beyond the
+   * PM to route anything else to — the PM reassigning tasks/steps afterward
+   * (already-supported, existing functionality) is the fallback. Revisit if
+   * a real playbook wants role-based routing at creation time.
+   */
+  private async applyPlaybookDefaults(user: RequestUser, projectId: string, playbookId: string, eventDate: Date, pmId: string) {
+    const playbook = await this.prisma.client.playbook.findFirst({
+      where: { id: playbookId, workspaceId: user.workspaceId, deletedAt: null },
+    });
+    if (!playbook) return; // chosen playbook was deleted between the request and now — the project itself still stands
+
+    const tasks = playbook.defaultTasks as unknown as PlaybookTaskInput[];
+    for (const t of tasks) {
+      const dueAt = t.dueOffsetDays !== undefined ? new Date(eventDate.getTime() - t.dueOffsetDays * 86400000) : null;
+      await this.prisma.client.task.create({
+        data: {
+          projectId, name: t.name, ownerId: pmId, dueAt, status: "BACKLOG", priority: "MEDIUM",
+          createdById: user.id, updatedById: user.id,
+        },
+      });
+    }
+
+    for (const templateId of playbook.defaultFlowTemplateIds) {
+      const template = await this.prisma.client.flowTemplate.findFirst({
+        where: { id: templateId, workspaceId: user.workspaceId, deletedAt: null },
+      });
+      if (!template) continue; // referenced template was deleted since — skip rather than fail the whole conversion
+      const steps = template.steps as unknown as Array<{ k: string }>;
+      const ownerOverrides = Object.fromEntries(steps.map((s) => [s.k, pmId]));
+      await this.flows.instantiate(user, { templateId, projectId, ownerOverrides });
+    }
   }
 
   /**

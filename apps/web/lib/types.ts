@@ -323,3 +323,63 @@ export interface IncidentDto {
   raisedRiskId: string | null;
   createdAt: string;
 }
+
+// -------------------------------------------------------------- playbooks
+export interface PlaybookTaskDto {
+  name: string;
+  dueOffsetDays?: number;
+}
+
+export interface PlaybookDto {
+  id: string;
+  name: string;
+  eventType: string;
+  defaultStages: string[];
+  defaultTasks: PlaybookTaskDto[];
+  defaultFlowTemplateIds: string[];
+  createdAt: string;
+}
+
+export interface FlowTemplateOptionDto {
+  id: string;
+  name: string;
+  category: string;
+}
+
+// ----------------------------------------------------------- menu costing
+export interface InventoryItemOptionDto {
+  id: string;
+  sku: string;
+  name: string;
+  unit: string;
+  sizeMl: number | null;
+  standardCost: string | number;
+}
+
+export interface RecipeItemDto {
+  id: string;
+  skuId: string;
+  qtyMl: number;
+  costable: boolean;
+  cost: number | null;
+  item: { id: string; sku: string; name: string; unit: string; sizeMl: number | null };
+}
+
+export interface RecipeCostingDto {
+  ingredientCost: number | null;
+  garnishCost: number;
+  totalCost: number | null;
+  margin: number | null;
+  marginPct: number | null;
+  allCostable: boolean;
+}
+
+export interface RecipeDto {
+  id: string;
+  name: string;
+  glass: string;
+  garnishCost: string | number;
+  price: string | number;
+  items: RecipeItemDto[];
+  costing: RecipeCostingDto;
+}

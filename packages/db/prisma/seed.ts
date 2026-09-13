@@ -88,7 +88,7 @@ const RESOURCES = [
   "projects", "tasks", "flows", "clients", "leads", "vendors", "invoices",
   "payments", "budgets", "expenses", "inventory", "purchase_requests",
   "approvals", "licences", "risks", "documents", "reports", "settings",
-  "automation", "audit_logs", "people",
+  "automation", "audit_logs", "people", "playbooks", "recipes",
 ];
 const ACTIONS = ["view", "create", "edit", "delete", "approve", "export"];
 
@@ -406,8 +406,11 @@ async function main() {
     "Project Manager": [
       ...["projects", "tasks", "flows", "documents", "risks" as string].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
       "invoices:view", "budgets:view", "approvals:approve", "approvals:view", "approvals:create",
+      // Phase E: a PM picks a playbook when converting a Won deal into a
+      // project, but playbook authoring stays with Founder/Admin.
+      "playbooks:view",
     ],
-    Operations: ["tasks", "flows", "inventory", "vendors", "purchase_requests", "people"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
+    Operations: ["tasks", "flows", "inventory", "vendors", "purchase_requests", "people", "recipes"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
     Finance: ["invoices", "payments", "budgets", "expenses", "reports"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`))
       .concat(["approvals:approve", "approvals:view", "projects:view"]),
     Sales: ["leads", "clients"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
