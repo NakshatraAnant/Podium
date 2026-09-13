@@ -49,9 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Phase H.2 (self-correcting sub-phase): this used to also pin
+      # `version: 10` here, which pnpm/action-setup@v4 rejects outright when
+      # package.json *also* pins a packageManager field ("Multiple versions
+      # of pnpm specified") — a real, pre-existing config defect that had
+      # never actually run, since this workflow only ever triggered on
+      # main push/PR and this branch had never pushed there. Found the
+      # moment a real run was first triggered for Phase H. package.json's
+      # own "packageManager": "pnpm@10.33.0" is the single source of truth
+      # now; the action reads it automatically with no `version` input.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
