@@ -52,7 +52,7 @@ docker compose up -d
 cp .env.example .env
 
 # 4. Build shared packages, generate the Prisma client, apply migrations
-pnpm setup
+pnpm bootstrap
 
 # 5. Load the demo fixture (clients, projects, vendors, inventory, flows…)
 PODIUM_ALLOW_DESTRUCTIVE_SEED=1 pnpm db:seed
@@ -112,14 +112,15 @@ above from a clean clone — they're the failure modes worth recognising:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Cannot find module '@podium/shared-types'` when starting the API | `shared-types` compiles to `dist/`, which doesn't exist in a fresh clone | Run `pnpm setup` (step 4) before step 6 |
+| `Cannot find module '@podium/shared-types'` when starting the API | `shared-types` compiles to `dist/`, which doesn't exist in a fresh clone | Run `pnpm bootstrap` (step 4) before step 6 |
 | `Cannot find module '../common/decorators/...'` at API startup, right after fixing the above | A failed compile left a partial `apps/api/dist`, and the incremental rebuild considers it current | `rm -rf apps/api/dist apps/api/tsconfig.tsbuildinfo`, then `pnpm dev:api` |
 | `Configuration key "JWT_ACCESS_SECRET" does not exist` | `.env` missing at the repo root — the API resolves it relative to its own source, not your shell's cwd | `cp .env.example .env` (step 3) |
 | `P1012 Environment variable not found: DATABASE_URL` from Prisma | Same — no root `.env` | `cp .env.example .env` (step 3) |
 | `Refusing to seed: … Set PODIUM_ALLOW_DESTRUCTIVE_SEED=1` | The seed guard, working as designed | Use the step 5 command exactly as written |
 | `Refusing to seed: … (resolved database: "")` | Prisma/seed found no `DATABASE_URL` at all | `cp .env.example .env` (step 3) |
-| `prisma migrate dev` stops at `Enter a name for the new migration` | `schema.prisma` has drifted from the committed migrations | Setup uses `migrate deploy`, which never prompts. If you see this while *authoring* a schema change, it's telling you the truth — name the migration and commit it |
+| `prisma migrate dev` stops at `Enter a name for the new migration` | `schema.prisma` has drifted from the committed migrations | Bootstrap uses `migrate deploy`, which never prompts. If you see this while *authoring* a schema change, it's telling you the truth — name the migration and commit it |
 | `docker compose up -d` fails to pull images | No network access to Docker Hub | Use the "Without Docker" path above |
+| `pnpm setup` prints pnpm home/PATH config and exits 0 without building anything | `setup` is a built-in pnpm command, so it shadows any script of that name — which is why step 4 is called `bootstrap` | Run `pnpm bootstrap` |
 
 ## What must never be done (non-negotiable, see blueprint §7 / prompt §7)
 

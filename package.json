@@ -9,7 +9,7 @@
   },
   "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "setup": "pnpm build:packages && pnpm db:migrate:deploy",
+    "bootstrap": "pnpm build:packages && pnpm db:migrate:deploy",
     "build:packages": "pnpm --filter @podium/shared-types build && pnpm --filter @podium/db generate",
     "dev:api": "pnpm --filter @podium/api dev",
     "dev:web": "pnpm --filter @podium/web dev",
