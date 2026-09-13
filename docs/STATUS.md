@@ -165,8 +165,11 @@ passing, because with a 20-second token the timer is irrelevant and the
 retry path is all there is. Only the full-length soak against the real
 TTL could distinguish "kept alive" from "repeatedly resuscitated".
 
-The soak was then re-run in full against the fix; its result is recorded
-in the follow-up commit rather than assumed here.
+**Re-run in full against the fix: ALL CHECKS PASSED** — still signed in
+across the whole 17 minutes, the proactive timer refreshed the session,
+and **not a single request failed with 401**. The distinction against the
+first run is the whole result: same "still signed in", but the lapse is
+now prevented rather than recovered from.
 - CI: runs 7–11 on this branch, all automatically triggered by push.
 
 ### What's still not done
