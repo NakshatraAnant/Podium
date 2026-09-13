@@ -37,6 +37,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
     items: [
       { href: "/inventory", icon: "▣", label: "Inventory" },
       { href: "/procurement", icon: "⛁", label: "Procurement" },
+      { href: "/vendors", icon: "⚑", label: "Vendors" },
       { href: "/menu", icon: "☕", label: "Menu Costing" },
     ],
   },
@@ -54,6 +55,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
     items: [
       { href: "/compliance", icon: "§", label: "Compliance" },
       { href: "/approvals", icon: "✓", label: "Approvals" },
+      { href: "/automation", icon: "⚙", label: "Automation" },
     ],
   },
 ];

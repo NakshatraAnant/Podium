@@ -44,6 +44,11 @@ export const STATUS_PILL_COLOR: Record<string, "green" | "red" | "amber" | "blue
   NEGOTIATION: "amber",
   WON: "green",
   LOST: "red",
+  // Automation run statuses (Phase I).
+  SUCCESS: "green",
+  FAILED: "red",
+  RETRYING: "amber",
+  BLOCKED: "amber",
 };
 
 export const HEALTH_COLOR: Record<string, string> = { GREEN: "green", AMBER: "amber", RED: "red" };

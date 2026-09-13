@@ -9,6 +9,106 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-10 PHASE I — Full frontend completion pass (2026-09-13)
+
+**OBJECTIVE:** audit `apps/web/app` against every backend module and
+`docs/screens.md`'s 33-screen spec, and build real frontend surface for
+whatever has a working, tested backend and no UI at all — the same gap
+class Phase F.5 closed for CRM/pipeline, wherever else it still exists.
+
+**WHAT CHANGED:** two modules had a complete, real, RBAC-correct backend
+and zero frontend:
+
+*Vendors master* (`/vendors`, blueprint screen 17) — list + create/edit,
+filterable by city, following the exact `ClientsService`/`VendorsService`
+pattern already in place. Found and fixed one real, live gap while
+building the form: `createVendorSchema`/`updateVendorSchema` never
+included `contactName`/`phone`/`email`/`address`, even though the
+`Vendor` model has always carried them — a form with those fields would
+have looked like it saved them while Zod silently stripped every one on
+the way to Prisma. Extended both schemas rather than removing the fields
+from the form: the model already made them optional, so this is closing
+a real, pre-existing gap between schema and DTO, not scope creep. Live-
+verified: created a real vendor through the UI with a contact name and
+phone, confirmed both persisted by seeing them in the list afterward.
+
+*Automation rules admin* (`/automation`, blueprint screen 30) — the
+automation engine and its run log (`GET /automation/runs`,
+`/automation/triggers`) have existed since Phase 11, but nothing ever
+exposed the rules themselves or let anyone toggle one. Added
+`GET /automation/rules` and `PATCH /automation/rules/:id` (both gated on
+the existing `automation` resource — Founder/Admin only, matching every
+other workspace-config surface) and a page listing all 11 rules with
+their real trigger type, actions, and on/off state, plus the existing run
+log below it. Verified the toggle is a genuine kill switch, not cosmetic
+— `AutomationService.emit()`/`retryFailed()` both already filter
+candidate rules on `isEnabled: true` — with a real e2e test: disabled
+`au11` (chat @mention), posted a real @mention, confirmed zero
+notifications were created, then re-enabled it. Then repeated the same
+check live in a real browser (toggle off/on, confirmed the button state
+round-trips) rather than only trusting the API test.
+
+**What's still not done, and why:** every other gap identified against
+the 33-screen spec falls into one of three buckets, none of which get
+built speculatively:
+- **Blocked on real credentials that don't exist in this environment** —
+  Mail (Gmail inbox), Meetings (Google Meet links), Calendar. The
+  blueprint itself marks these "stub without real OAuth creds"; building
+  a UI in front of a backend that can't actually connect to anything
+  would be a prop, not a feature.
+- **Duplicative of something already real** — a standalone synthetic P&L
+  view (`pnlFor()`) was deliberately never built; Reports/P&L (Phase C)
+  already ships real actuals plus an explicitly-labeled forecast, and
+  blueprint §16 is explicit that the two must never blend. Building the
+  synthetic screen separately would just be a second, worse version of
+  what already exists.
+- **Genuinely lower priority, no real backend demand yet** — My Work
+  (a personal queue; the dashboard already surfaces company-wide pending
+  approvals/risks, and Flows/Tasks each already have a "mine" indicator),
+  a read-only Settings/RBAC roles-and-permissions view (would need a new
+  enumeration endpoint over `role_permissions` with nothing currently
+  asking for it), Timeline, Resources, Knowledge/SOPs, session-only Audit
+  CSV export, and What's New — every one of these is marked ⬜ in
+  `docs/screens.md` with either no real backing table (`sops`,
+  `equipment`) or a "recommended, not in blueprint §9" flag already on
+  it. Building any of them now would be inventing scope, not completing
+  it.
+
+### What you actually ran
+
+- `pnpm --filter @podium/shared-types build`, `pnpm --filter @podium/api|
+  web exec tsc --noEmit` — all clean. `pnpm --filter @podium/api|web
+  lint` — both clean (one pre-existing, unrelated warning).
+- New `automation-rules.e2e-spec.ts` (4 tests: list, RBAC-blocked for a
+  PM, the real kill-switch check via an actual chat @mention while
+  disabled, 404 for a missing rule) — run twice consecutively, then as
+  part of the full suite (26 suites / 194 tests) twice consecutively
+  against `podium_test` with no reseed, 194/194 both times.
+- Live verification against `podium_dev` with a real Playwright browser
+  session logged in as Anant Sharma (Founder): opened `/vendors`, created
+  a real vendor with contact details, confirmed it appeared in the list
+  afterward with those details intact (proving the schema fix actually
+  persists them, not just typechecks); opened `/automation`, confirmed
+  all 11 real rules render with correct trigger/action/enabled data,
+  clicked Disable on the Chat @mention rule and confirmed the button
+  flipped to Enable, then restored it back to its original state.
+  Screenshots taken and sent alongside this report.
+- `podium_prod` re-checked: 52,024 clients / 15 users unchanged (all
+  verification ran against `podium_dev`).
+
+### Known issues
+
+None found this phase.
+
+### Next step
+
+This closes the master build prompt's Phase C–I sequence (with F.5 added
+per addendum). Remaining work is entirely the deliberately-out-of-scope
+items listed above, each blocked on a real decision or resource this
+build doesn't have (OAuth credentials, a staging deployment target, or an
+explicit ask to build a specific lower-priority screen) — not on anything
+technical.
+
 ## 0.-9 PHASE H — Infrastructure hardening: BullMQ sweeps, httpOnly cookies, real CI (2026-09-13)
 
 **OBJECTIVE:** Four infrastructure gaps flagged across earlier phases as

@@ -219,6 +219,20 @@ export interface VendorOptionDto {
   status: string;
 }
 
+export interface VendorDto {
+  id: string;
+  name: string;
+  category: string | null;
+  cityId: string | null;
+  contactName: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  rating: string | number | null;
+  gstin: string | null;
+  status: "PREFERRED" | "APPROVED" | "BLACKLISTED";
+}
+
 export interface InventoryBalanceDto {
   item: { id: string; sku: string; name: string; unit: string; standardCost: string | number };
   location: { id: string; name: string; city: { id: string; name: string } };
@@ -460,4 +474,26 @@ export interface UserSummaryDto {
   name: string;
   email: string;
   roles: string[];
+}
+
+// ------------------------------------------------------------- automation
+export interface AutomationRuleDto {
+  id: string;
+  name: string;
+  triggerType: string;
+  triggerConfig: unknown;
+  actions: Array<{ type?: string; config?: unknown } | string>;
+  isEnabled: boolean;
+  updatedAt: string;
+}
+
+export interface AutomationRunDto {
+  id: string;
+  ruleId: string;
+  status: "PENDING" | "SUCCESS" | "FAILED" | "RETRYING" | "BLOCKED";
+  error: string | null;
+  attempt: number;
+  startedAt: string;
+  finishedAt: string | null;
+  rule: { name: string; triggerType: string };
 }

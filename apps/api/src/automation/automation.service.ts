@@ -191,6 +191,26 @@ export class AutomationService {
       take: limit,
     });
   }
+
+  /** Phase I: the rule list + on/off toggle blueprint §12's admin screen calls for — never existed as an endpoint before. */
+  async listRules(workspaceId: string) {
+    return this.prisma.client.automationRule.findMany({
+      where: { workspaceId, deletedAt: null },
+      orderBy: { name: "asc" },
+    });
+  }
+
+  /**
+   * Toggling `isEnabled` off is a real kill switch, not cosmetic — every
+   * candidate-rule query in this file (emit()'s trigger match, retryFailed())
+   * filters on `isEnabled: true`, so a disabled rule genuinely stops firing
+   * on its very next event.
+   */
+  async setRuleEnabled(workspaceId: string, ruleId: string, isEnabled: boolean) {
+    const rule = await this.prisma.client.automationRule.findFirst({ where: { id: ruleId, workspaceId, deletedAt: null } });
+    if (!rule) return null;
+    return this.prisma.client.automationRule.update({ where: { id: ruleId }, data: { isEnabled } });
+  }
 }
 
 function splitTrigger(t: string): [string, string | undefined] {
