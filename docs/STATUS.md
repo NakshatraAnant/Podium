@@ -130,11 +130,43 @@ troubleshooting row.
     exercises the **reactive** path.
   - **17-minute active-user soak against the real 15-minute TTL**
     (`SOAK_MINUTES=17`, activity every 30s, requiring *zero* 401s rather
-    than merely recovered ones): still running when this section was
-    committed — verified beforehand that the API under test issues real
-    900-second tokens, so the soak genuinely crosses the expiry
-    boundary. Result recorded in the follow-up commit rather than
-    asserted here.
+    than merely recovered ones; confirmed beforehand that the API under
+    test issues real 900-second tokens, so the soak genuinely crosses the
+    expiry boundary). **The first soak failed, and finding that was the
+    entire point of running it** — see below.
+
+### The soak found a real bug that the short-TTL run could not
+
+The first 17-minute soak reported: still signed in throughout, exactly
+**one** refresh call, and **one** request that failed with 401
+(`/notifications/unread-count`, the notification bell's 20-second poll).
+Read together that is a precise signature: the proactive timer never
+fired at all, the token lapsed at 15 minutes as it always had, and the
+retry-on-401 quietly rescued it. The user-visible outcome was fine, which
+is exactly why a weaker check — "were you logged out?" — would have
+passed and left the proactive half dead in the water.
+
+Cause: a full page load remounts `AuthProvider`, which reset its
+`lastRefreshAt` ref to "now". The soak navigates every ~2 minutes, so the
+10-minute countdown restarted before it ever completed. Any real user
+who reloads more often than the refresh interval had the same silently
+degraded behaviour — protected only by the safety net, never by the
+mechanism meant to prevent the lapse.
+
+Fixed by persisting the last-refresh timestamp across page loads. The
+token's own age is the right thing to key on, but it is httpOnly and
+unreadable by design, so the timestamp stands in for it; it is not a
+credential, grants nothing, and reintroduces none of the XSS exposure
+Phase H closed by moving tokens out of localStorage. `refreshSession()`
+now owns writing it, so a reactive refresh advances the clock too.
+
+Worth stating plainly: the short-TTL run had passed, and would have kept
+passing, because with a 20-second token the timer is irrelevant and the
+retry path is all there is. Only the full-length soak against the real
+TTL could distinguish "kept alive" from "repeatedly resuscitated".
+
+The soak was then re-run in full against the fix; its result is recorded
+in the follow-up commit rather than assumed here.
 - CI: runs 7–11 on this branch, all automatically triggered by push.
 
 ### What's still not done
