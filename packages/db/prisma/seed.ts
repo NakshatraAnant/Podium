@@ -291,6 +291,7 @@ const AUTOMATIONS = [
   { id: "au8", name: "Invoice overdue → Gmail reminder", triggerType: "time_relative", trigger: "invoice.overdue_days:7", actions: ["Draft reminder in Gmail", "Notify Client Servicing Lead", "Flag on city P&L"], on: true },
   { id: "au9", name: "Meet ends → action items to tasks", triggerType: "event", trigger: "meeting.ended", actions: ["Pull notes from Meet", "Create tasks for each action item", "Post summary to project channel"], on: false },
   { id: "au10", name: "Licence not approved T-7", triggerType: "time_relative", trigger: "licence.due_date_minus_days:7", actions: ["Escalate to Operations Manager", "Raise project risk"], on: true },
+  { id: "au11", name: "Chat @mention → notification", triggerType: "event", trigger: "chat.mentioned", actions: ["Notify the mentioned person"], on: true },
 ];
 
 const CHANNEL_MESSAGES: Array<[string, string, string]> = [

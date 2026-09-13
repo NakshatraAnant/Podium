@@ -2,11 +2,11 @@ import { Module, type OnModuleInit } from "@nestjs/common";
 import { AutomationController } from "./automation.controller";
 import { AutomationScheduler } from "./automation.scheduler";
 import { AutomationService } from "./automation.service";
-import { DealWonHandler, LicenceEscalationHandler, LowStockHandler } from "./handlers";
+import { ChatMentionHandler, DealWonHandler, LicenceEscalationHandler, LowStockHandler } from "./handlers";
 
 @Module({
   controllers: [AutomationController],
-  providers: [AutomationService, AutomationScheduler, DealWonHandler, LowStockHandler, LicenceEscalationHandler],
+  providers: [AutomationService, AutomationScheduler, DealWonHandler, LowStockHandler, LicenceEscalationHandler, ChatMentionHandler],
   exports: [AutomationService],
 })
 export class AutomationModule implements OnModuleInit {
@@ -15,6 +15,7 @@ export class AutomationModule implements OnModuleInit {
     private readonly dealWon: DealWonHandler,
     private readonly lowStock: LowStockHandler,
     private readonly licence: LicenceEscalationHandler,
+    private readonly chatMention: ChatMentionHandler,
   ) {}
 
   /** Handlers are registered once at boot, keyed by the trigger they answer. */
@@ -22,5 +23,6 @@ export class AutomationModule implements OnModuleInit {
     this.automation.register(this.dealWon);
     this.automation.register(this.lowStock);
     this.automation.register(this.licence);
+    this.automation.register(this.chatMention);
   }
 }

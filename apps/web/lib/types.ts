@@ -397,6 +397,16 @@ export interface DocumentVersionDto {
   createdAt: string;
 }
 
+export interface NotificationDto {
+  id: string;
+  icon: string | null;
+  text: string;
+  readAt: string | null;
+  sourceType: string | null;
+  sourceId: string | null;
+  createdAt: string;
+}
+
 export interface DocumentDto {
   id: string;
   name: string;

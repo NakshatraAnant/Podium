@@ -4,6 +4,7 @@ import { initials } from "@podium/ui";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { useAuth } from "../lib/auth";
+import { NotificationBell } from "./NotificationBell";
 
 const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: string; label: string }> }> = [
   {
@@ -109,7 +110,8 @@ export function AppShell({ children, crumb }: { children: ReactNode; crumb: stri
           <span>⌕</span>
           <span>Search projects, flows, people, invoices, stock…</span>
         </div>
-        <div className="topbar-right">
+        <div className="topbar-right" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <NotificationBell />
           <button className="topbar-avatar" title={user.name}>
             {initials(user.name)}
           </button>

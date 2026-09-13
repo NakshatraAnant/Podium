@@ -105,6 +105,52 @@ export class DealWonHandler implements ActionHandler {
 }
 
 /**
+ * Rule au11 — "Chat @mention -> notification" (blueprint §23/§12).
+ *
+ * Deliberately stops at a notification, not a task: the existing
+ * promote-to-task flow (ChatService.promoteMessageToTask) requires a human
+ * to confirm the task's name, owner and — critically — its due date
+ * ("a guessed deadline is a guessed commitment", per that flow's own
+ * design comment). Auto-creating a task straight from a mention would
+ * silently bypass that. This rule closes the actual gap instead: today,
+ * posting "@Rohit please confirm sound vendor" notifies nobody until Rohit
+ * happens to read the channel. Its `entityId` is `${messageId}:${userId}`,
+ * not just the message id — one message mentioning three people is three
+ * independent notifications, each idempotent on its own (message, person)
+ * pair, not collapsed onto a single trigger-hash slot.
+ */
+@Injectable()
+export class ChatMentionHandler implements ActionHandler {
+  readonly trigger = "chat.mentioned";
+  constructor(private readonly prisma: PrismaService) {}
+
+  matches(event: AutomationEvent): boolean {
+    return event.entityType === "chat_mention";
+  }
+
+  async run(event: AutomationEvent): Promise<RunOutcome> {
+    const payload = event.payload as { mentionedUserId: string; senderName: string; snippet: string; messageId: string; channelId: string } | undefined;
+    if (!payload?.mentionedUserId) return { status: "FAILED", error: "Missing mentionedUserId in event payload." };
+
+    const user = await this.prisma.client.user.findFirst({ where: { id: payload.mentionedUserId, deletedAt: null } });
+    if (!user) return { status: "SUCCESS", detail: { skipped: "mentioned user no longer exists" } };
+
+    await this.prisma.client.notification.create({
+      data: {
+        workspaceId: event.workspaceId,
+        userId: payload.mentionedUserId,
+        icon: "✎",
+        text: `${payload.senderName} mentioned you in chat: "${payload.snippet}"`,
+        sourceType: "message",
+        sourceId: payload.messageId,
+      },
+    });
+
+    return { status: "SUCCESS", detail: { notifiedUserId: payload.mentionedUserId } };
+  }
+}
+
+/**
  * Rule — "Low stock -> purchase request". Threshold-triggered from the real
  * inventory ledger: raises nothing itself beyond a notification to Procurement,
  * because auto-raising a purchase request against a real vendor commits real

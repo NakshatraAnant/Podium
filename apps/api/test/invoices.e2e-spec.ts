@@ -73,12 +73,16 @@ describe("Invoices — GST engine (e2e)", () => {
 
   it("mints strictly increasing, never-reused sequence numbers per city per FY", async () => {
     const jaipur = await prisma.city.findFirstOrThrow({ where: { name: "Jaipur" } });
-    const client = await prisma.client.findFirstOrThrow({ where: { cityId: jaipur.id } });
-    const project = await prisma.project.findFirstOrThrow({ where: { clientId: client.id } });
+    // Query from the project side, not the client side: a Jaipur client with
+    // no project at all is a real possibility in this shared, ever-growing
+    // test database (findFirstOrThrow on the client table has no guaranteed
+    // order and no filter for "has a project"), whereas a project always has
+    // a real client attached.
+    const project = await prisma.project.findFirstOrThrow({ where: { cityId: jaipur.id } });
 
     const mint = async () => {
       const draft = await post("/api/invoices", {
-        clientId: client.id,
+        clientId: project.clientId,
         projectId: project.id,
         cityId: jaipur.id,
         dueDate: new Date(Date.now() + 14 * 86400000).toISOString(),
@@ -96,10 +100,9 @@ describe("Invoices — GST engine (e2e)", () => {
 
   it("refuses to issue an already-issued invoice a second time", async () => {
     const jaipur = await prisma.city.findFirstOrThrow({ where: { name: "Jaipur" } });
-    const client = await prisma.client.findFirstOrThrow({ where: { cityId: jaipur.id } });
-    const project = await prisma.project.findFirstOrThrow({ where: { clientId: client.id } });
+    const project = await prisma.project.findFirstOrThrow({ where: { cityId: jaipur.id } });
     const draft = await post("/api/invoices", {
-      clientId: client.id, projectId: project.id, cityId: jaipur.id,
+      clientId: project.clientId, projectId: project.id, cityId: jaipur.id,
       dueDate: new Date(Date.now() + 14 * 86400000).toISOString(),
       items: [{ description: "double issue test", qty: 1, rate: 1000 }],
     });

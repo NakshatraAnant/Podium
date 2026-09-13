@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { PostMessageInput, PromoteMessageInput } from "@podium/shared-types";
+import { AutomationService } from "../automation/automation.service";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
@@ -16,6 +17,7 @@ export class ChatService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cityScope: CityScopeService,
+    private readonly automation: AutomationService,
   ) {}
 
   async listChannels(user: RequestUser) {
@@ -46,7 +48,31 @@ export class ChatService {
 
   async postMessage(user: RequestUser, channelId: string, input: PostMessageInput) {
     await this.assertChannelAccess(user, channelId);
-    return this.prisma.client.message.create({ data: { channelId, authorId: user.id, body: input.body } });
+    const message = await this.prisma.client.message.create({ data: { channelId, authorId: user.id, body: input.body } });
+
+    // Rule au11 ("Chat @mention -> notification"). Fired after the write has
+    // committed, same convention as every other automation.emit() call in
+    // this codebase — a notification failing must never roll back the
+    // message that already posted. Real, resolved mentions only: an
+    // unresolved or ambiguous handle notifies nobody rather than guessing.
+    const roster = await this.prisma.client.user.findMany({
+      where: { workspaceId: user.workspaceId, deletedAt: null },
+      select: { id: true, name: true, email: true },
+    });
+    const mentioned = resolveMentions(message.body, roster)
+      .map((m) => m.user)
+      .filter((u): u is NonNullable<typeof u> => u !== null && u.id !== user.id);
+    for (const target of mentioned) {
+      await this.automation.emit({
+        trigger: "chat.mentioned",
+        workspaceId: user.workspaceId,
+        entityType: "chat_mention",
+        entityId: `${message.id}:${target.id}`,
+        payload: { mentionedUserId: target.id, senderName: user.name, snippet: message.body.slice(0, 140), messageId: message.id, channelId },
+      });
+    }
+
+    return message;
   }
 
 

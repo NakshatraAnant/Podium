@@ -9,6 +9,143 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-8 PHASE G — Notifications + bell UI, chat @mention automation rule (2026-09-13)
+
+**OBJECTIVE:** `notifications` rows have been written by other modules
+(flows, event day, automation handlers) since early in this build, but
+nothing ever listed, read, or marked them read — the schema table had no
+API surface. Separately, chat @mentions were only resolved lazily inside
+the manual promote-to-task confirm dialog: posting "@Rohit please confirm
+the sound vendor" notified nobody until Rohit happened to read the
+channel. Close both gaps.
+
+**WHAT CHANGED:**
+
+*Notifications module (new):* `apps/api/src/notifications/*` — list
+(newest first, optional `unreadOnly`), unread-count, mark-one-read,
+mark-all-read. No RBAC gate beyond authentication — "your own
+notifications" needs no permission check, same standing as `GET
+/users/me`; every row is scoped to `userId: user.id`, so there is nothing
+to authorize beyond who you are. `components/NotificationBell.tsx` — a
+bell in the topbar with an unread-count badge, a dropdown listing recent
+notifications, click-to-mark-read, and a "mark all read" action.
+
+*Rule au11 — "Chat @mention -> notification" (new, registered in the
+generalized automation engine, not a one-off):* `ChatService.
+postMessage()` now resolves the posted message's real, unambiguous
+mentions immediately and emits a `chat.mentioned` event per mentioned
+person through `AutomationService.emit()` — the same engine and
+idempotency machinery as the other ten rules, not a separate mechanism.
+`ChatMentionHandler` (in `automation/handlers.ts`, alongside
+`DealWonHandler`/`LowStockHandler`/`LicenceEscalationHandler`) creates the
+actual notification. Deliberately stops there — it does NOT auto-create a
+task. The existing `promoteMessageToTask` flow requires a human to confirm
+the task's name, owner, and due date ("a guessed deadline is a guessed
+commitment," per that flow's own design comment); auto-creating a task
+straight from a mention would silently bypass exactly that safeguard. This
+rule closes the actual gap (nobody got told) without touching the
+deliberate one (a task still needs a human to commit to it).
+
+One mechanical wrinkle: the automation engine's idempotency key is
+`(ruleId, entityId, triggerHash)` — one entity, one outcome. A single
+message can mention several people, each needing their own independent
+notification, so `entityId` for this trigger is `${messageId}:${userId}`,
+not just the message id — verified with a test asserting two mentions in
+one message produce exactly two notifications, one per person, not one
+shared or collapsed slot.
+
+`au11` was added to `packages/db/prisma/seed.ts`'s `AUTOMATIONS` list (for
+future fresh seeds) and backfilled into `podium_dev`/`podium_test`/
+`podium_prod` via a new standalone, additive, idempotent script —
+`scripts/backfill-au11-chat-mention-rule.ts`, following the exact same
+pattern as Phase E's permission backfill (checks for an existing row by
+name before inserting; a second run is a no-op, verified on all three
+databases).
+
+### Phase G.1 — a pre-existing test bug surfaced by this session's own accumulated data
+
+Found running the full suite while validating this phase's own tests
+(unrelated to notifications directly): `invoices.e2e-spec.ts`'s two
+sequence-number tests both failed with "No Project found," reproducibly,
+run alone. Root cause: both tests fetched a Jaipur client via
+`prisma.client.findFirstOrThrow({ where: { cityId: jaipur.id } })` with no
+`orderBy` and no filter for "has a project," then looked up a project from
+that client. `findFirst` with no ordering has no guaranteed row order;
+`podium_test`'s `clients` table has grown considerably over this session's
+many phases (leads-playbook-wiring alone adds several new Jaipur clients
+across three of its own tests, one per run), and at some point the
+unordered scan started returning a project-less client instead of the
+originally-seeded one that has always backed these tests. Not something my
+diff introduced directly, but a real, reproducible defect in already-built
+test code, found incidentally while working on something else — the
+textbook self-correcting-sub-phase case. Fixed narrowly: query from the
+project side instead (`project.findFirstOrThrow({ where: { cityId } })`,
+using `project.clientId` directly) — a project is guaranteed to have a
+real client, so there's nothing to hope for the way there was querying
+from the client side. Verified: `invoices.e2e-spec.ts` alone, then the
+full suite, both clean.
+
+Also found and fixed two genuine re-runnability bugs in this phase's own
+new tests before they ever reached a committed state: both
+`chat-mention-notification.e2e-spec.ts` and `notifications.e2e-spec.ts`
+asserted global before/after notification counts for real, widely-reused
+seeded users (Rohit Meena, Anant Sharma) — safe when each file ran alone,
+but racing each other (and potentially `automation.e2e-spec.ts`'s
+low-stock scenario, which notifies every Founder) when Jest runs test
+files in parallel workers against the same shared database. Fixed by
+scoping every assertion to a specific row (by `sourceId`, or a
+purpose-created row's own id) instead of a shared user's running total —
+the same principle Phase B.1 already established for exactly this class
+of bug.
+
+### What you actually ran
+
+- `pnpm --filter @podium/api|web exec tsc --noEmit` — both clean.
+- Full e2e suite: 23 suites / 178 tests (15 new: 5 chat-mention, 5
+  notifications-endpoint, plus the invoices fix), run three times
+  consecutively against `podium_test` with no reseed — 178/178 all three
+  times (the extra run, again, because this phase involved fixing real
+  flakiness, not just adding tests).
+- `scripts/backfill-au11-chat-mention-rule.ts` run against `podium_dev`,
+  `podium_test`, `podium_prod` — each created the rule once, confirmed 0
+  new rows (skip logged) on a second run against `podium_prod`
+  specifically.
+- Live verification against `podium_dev`: two real logged-in browser
+  sessions via Playwright — Simran Kaur posted "@Rohit please confirm the
+  sound vendor" in a company channel; Rohit Meena's session (a separate
+  browser context, not a shared token) showed the bell's unread badge
+  update, opened the dropdown, saw the real mention notification alongside
+  other genuinely pre-existing notifications from earlier phases' live
+  verification (an SLA-breach escalation, a Won-deal project creation),
+  and clicking it marked it read. Screenshots taken at each step.
+- `podium_prod` re-checked throughout: 52,024 clients / 15 users
+  unchanged; `automation_rules` grew by exactly the expected +1 (10→11);
+  `notifications` stayed at 0 (all verification ran against `podium_dev`).
+
+### What's still not done
+
+- The bell's unread-count polls on a 20-second interval rather than
+  pushing in real time (no websocket/SSE layer exists in this build) —
+  acceptable for this phase's scope, worth reconsidering if real-time
+  matters later.
+- Clicking a notification only navigates for `sourceType: "project"` —
+  other source types (a task, a flow step, an inventory balance) mark read
+  but don't deep-link anywhere yet, since most of those don't have a
+  dedicated detail route to link to in the first place.
+- `AutomationController`'s existing admin surface (list rules, view runs)
+  was not extended with anything au11-specific — it already generically
+  lists whatever rules exist, so au11 shows up there for free.
+
+### Known issues
+
+None beyond Phase G.1, fixed above.
+
+### Next step
+
+Continuing into Phase H (infrastructure hardening: BullMQ for automation/
+SLA sweep, httpOnly cookies instead of localStorage, real GitHub Actions
+CI run, staging deploy) per the standing instruction.
+
 ## 0.-7 PHASE F — Documents: storage driver, upload/versioning, UI (2026-09-13)
 
 **OBJECTIVE:** `documents`/`document_versions` existed as schema-only tables
