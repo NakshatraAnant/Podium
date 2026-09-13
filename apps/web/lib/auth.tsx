@@ -3,7 +3,7 @@
 import type { AuthTokens } from "@podium/shared-types";
 import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, clearTokens, getAccessToken, setTokens } from "./api";
+import { api } from "./api";
 
 type CurrentUser = AuthTokens["user"];
 
@@ -22,11 +22,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
 
   useEffect(() => {
-    const token = getAccessToken();
-    if (!token) {
-      setLoading(false);
-      return;
-    }
+    // Phase H: the access token lives in an httpOnly cookie this code can't
+    // read, so there's no client-side way to tell "logged in" from "not"
+    // without asking the server — just call /users/me and let a 401 answer
+    // the question.
     api
       .get<{
         id: string;
@@ -37,14 +36,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         mustChangePassword: boolean;
       }>("/users/me")
       .then((me) => setUser(me))
-      .catch(() => clearTokens())
+      .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, []);
 
   const login = useCallback(
     async (email: string, password: string) => {
+      // The response still carries accessToken/refreshToken in the body for
+      // any non-browser caller, but the browser doesn't need them — the
+      // API's Set-Cookie header on this same response already planted the
+      // httpOnly session cookie.
       const res = await api.post<AuthTokens>("/auth/login", { email, password });
-      setTokens(res.accessToken, res.refreshToken);
       setUser(res.user);
       router.push("/dashboard");
     },
@@ -52,7 +54,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(() => {
-    clearTokens();
+    // Only the server can clear an httpOnly cookie (JS can't touch it), and
+    // logout must also revoke the refresh token server-side — so this is a
+    // real request now, not just a local state reset. Fire-and-forget: the
+    // UI moves on immediately either way.
+    api.post("/auth/logout").catch(() => undefined);
     setUser(null);
     router.push("/login");
   }, [router]);

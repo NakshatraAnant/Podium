@@ -1,5 +1,4 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { Cron, CronExpression } from "@nestjs/schedule";
 import type { FlowStepStatus } from "@podium/db";
 import { PrismaService } from "../common/prisma/prisma.service";
 
@@ -19,16 +18,15 @@ import { PrismaService } from "../common/prisma/prisma.service";
  * notification uses. Documented here as a judgment call, not silently
  * decided.
  *
- * Runs inside the API process on a one-minute cron rather than a separate
- * BullMQ worker. That's a pragmatic first version, not the end state the
- * blueprint's stack table describes (Redis + BullMQ, a dedicated
- * workers/ process) — fine at AMM's scale (a few hundred flow steps, not
- * thousands of concurrent tenants), but worth moving to a real worker
- * before this app runs anywhere with multiple API instances, since two
- * instances both running this cron would double-fire (each escalation is
- * individually idempotent — see the WHERE clause below — so double-firing
- * would waste a little work, not corrupt anything, but it's still not
- * the intended architecture).
+ * Phase H: moved off the API process's own one-minute cron and onto the
+ * `workers/` BullMQ scheduler (see workers/src/main.ts's flow.sla-sweep
+ * job) — running this in-process was only correct for exactly one API
+ * instance; a second instance running the same cron would double-fire
+ * (each escalation is individually idempotent, so double-firing wasted
+ * work rather than corrupting anything, but it was never the intended
+ * architecture). This method is unchanged and still directly callable —
+ * by the worker, or by a test driving a sweep deterministically — only
+ * the "when" moved.
  */
 @Injectable()
 export class FlowSlaService {
@@ -36,7 +34,6 @@ export class FlowSlaService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  @Cron(CronExpression.EVERY_MINUTE)
   async checkSlaBreaches(): Promise<{ escalated: number }> {
     const now = new Date();
 

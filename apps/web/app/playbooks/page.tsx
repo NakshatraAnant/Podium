@@ -179,7 +179,7 @@ function PlaybookEditor({
       </div>
 
       <div className="small" style={{ color: "var(--text-dim)", fontWeight: 500, marginBottom: 6 }}>
-        Default tasks — created automatically on this playbook's project, owned by the converting PM
+        Default tasks — created automatically on this playbook&apos;s project, owned by the converting PM
       </div>
       <table style={{ marginBottom: 10 }}>
         <thead>

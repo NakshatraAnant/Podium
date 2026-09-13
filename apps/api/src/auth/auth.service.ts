@@ -293,16 +293,29 @@ export class AuthService {
     });
     return raw;
   }
+
+  /** Phase H: lets the controller size the httpOnly cookie's maxAge to match the token it actually issued. */
+  getAccessTokenTtlMs(): number {
+    return parseDurationMs(this.config.get<string>("JWT_ACCESS_TTL") ?? "15m");
+  }
+
+  getRefreshTokenTtlMs(): number {
+    return parseDurationMs(this.config.get<string>("JWT_REFRESH_TTL") ?? "30d");
+  }
 }
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function addDuration(base: Date, spec: string): Date {
+function parseDurationMs(spec: string): number {
   const match = /^(\d+)([smhd])$/.exec(spec.trim());
-  if (!match) return new Date(base.getTime() + 30 * 24 * 60 * 60 * 1000);
+  if (!match) return 30 * 24 * 60 * 60 * 1000;
   const value = Number(match[1]);
   const unitMs = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as "s" | "m" | "h" | "d"];
-  return new Date(base.getTime() + value * unitMs);
+  return value * unitMs;
+}
+
+function addDuration(base: Date, spec: string): Date {
+  return new Date(base.getTime() + parseDurationMs(spec));
 }

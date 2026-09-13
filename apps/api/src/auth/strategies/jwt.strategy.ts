@@ -1,6 +1,7 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PassportStrategy } from "@nestjs/passport";
+import type { Request } from "express";
 import { ExtractJwt, Strategy } from "passport-jwt";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import type { RequestUser } from "../../common/types";
@@ -10,6 +11,19 @@ interface AccessTokenPayload {
   workspaceId: string;
 }
 
+/**
+ * Phase H: the web frontend no longer keeps the access token in
+ * localStorage (readable by any injected script) — it rides in an httpOnly
+ * cookie the browser sends automatically and JS can never read. The
+ * Authorization header stays supported too: every existing e2e test
+ * authenticates that way, and it remains the right shape for a non-browser
+ * API caller that has nowhere to keep a cookie. Cookie is tried first only
+ * because the browser is the case an attacker actually targets.
+ */
+function cookieExtractor(req: Request): string | null {
+  return req?.cookies?.accessToken ?? null;
+}
+
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
@@ -17,7 +31,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     private readonly prisma: PrismaService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: ExtractJwt.fromExtractors([cookieExtractor, ExtractJwt.fromAuthHeaderAsBearerToken()]),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>("JWT_ACCESS_SECRET"),
     });

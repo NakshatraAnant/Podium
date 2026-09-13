@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Phase H: lets a real run be triggered on demand against any branch
+  # (e.g. from the GitHub Actions UI or API) without changing what triggers
+  # CI automatically for anyone else — the push/pull_request triggers above
+  # are unchanged.
+  workflow_dispatch: {}
 
 env:
   DATABASE_URL: "postgresql://podium:podium_ci_password@localhost:5432/podium_ci_test?schema=public"

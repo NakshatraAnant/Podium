@@ -102,12 +102,40 @@ describe("Inventory ledger concurrency (e2e)", () => {
     expect([...cities]).toEqual(["Jaipur"]);
   });
 
+  /**
+   * Phase H.1 (self-correcting sub-phase): this test used to read the
+   * seeded Jaipur balance and transfer 3 units out of it directly — it
+   * passed on a freshly seeded database but drained the source balance by 3
+   * on every subsequent run, until a run found less than 3 units left and
+   * got a real 400 "insufficient stock" instead of the expected 201. Fixed
+   * with the same known-quantity setup already used above for the CONSUME
+   * test: bring the source balance to a fixed quantity through the real
+   * ledger first, so the test is idempotent and re-runnable any number of
+   * times.
+   */
   it("a transfer moves stock atomically between two locations", async () => {
     const item = await prisma.inventoryItem.findFirstOrThrow({ where: { sku: "SP-VOD-AB" } });
     const from = await prisma.inventoryLocation.findFirstOrThrow({ where: { name: "Jaipur Store" } });
     const to = await prisma.inventoryLocation.findFirstOrThrow({ where: { name: "Delhi Store" } });
+
+    const KNOWN_FROM_QTY = 10;
+    const currentFrom = await prisma.inventoryBalance.findFirst({ where: { skuId: item.id, locationId: from.id } });
+    const delta = KNOWN_FROM_QTY - (currentFrom?.qtyOnHand ?? 0);
+    if (delta !== 0) {
+      const setupRes = await request(app.getHttpServer())
+        .post("/api/inventory/movements")
+        .set("Authorization", `Bearer ${token}`)
+        .send(
+          delta > 0
+            ? { skuId: item.id, type: "RECEIVE", toLocationId: from.id, qty: delta, note: "test setup" }
+            : { skuId: item.id, type: "CONSUME", fromLocationId: from.id, qty: -delta, note: "test setup" },
+        );
+      expect(setupRes.status).toBe(201);
+    }
+
     const beforeFrom = await prisma.inventoryBalance.findFirstOrThrow({ where: { skuId: item.id, locationId: from.id } });
     const beforeTo = await prisma.inventoryBalance.findFirstOrThrow({ where: { skuId: item.id, locationId: to.id } });
+    expect(beforeFrom.qtyOnHand).toBe(KNOWN_FROM_QTY);
 
     await request(app.getHttpServer())
       .post("/api/inventory/movements")

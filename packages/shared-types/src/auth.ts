@@ -6,8 +6,12 @@ export const loginSchema = z.object({
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
+// Phase H: the refresh token now also rides in an httpOnly cookie, so a
+// browser caller has nothing to put in the body — the field is optional
+// here and the controller falls back to the cookie. A non-browser caller
+// with no cookie jar still passes it in the body exactly as before.
 export const refreshSchema = z.object({
-  refreshToken: z.string().min(1),
+  refreshToken: z.string().min(1).optional(),
 });
 export type RefreshInput = z.infer<typeof refreshSchema>;
 

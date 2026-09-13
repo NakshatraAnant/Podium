@@ -1,5 +1,4 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../common/prisma/prisma.service";
 import { AutomationService } from "./automation.service";
 
@@ -13,11 +12,11 @@ import { AutomationService } from "./automation.service";
  * that performs the action, so a Won lead fires its automation immediately
  * rather than up to an hour later.
  *
- * Runs in-process on @nestjs/schedule rather than as a BullMQ worker. That is
- * a documented shortcut, carried over from the SLA sweep: it is correct for a
- * single API instance and would double-fire across several, which is survivable
- * only because every run is idempotent. Moving these to `workers/` is the
- * follow-up.
+ * Phase H: moved off the API process's own @nestjs/schedule cron and onto
+ * the `workers/` BullMQ scheduler (see workers/src/main.ts's
+ * automation.tick job) — the same reasoning and the same fix as
+ * FlowSlaService. `sweep()`/`sweepWorkspace()` are unchanged and still
+ * directly callable by the worker or by a test.
  */
 @Injectable()
 export class AutomationScheduler {
@@ -28,7 +27,6 @@ export class AutomationScheduler {
     private readonly automation: AutomationService,
   ) {}
 
-  @Cron(CronExpression.EVERY_10_MINUTES)
   async sweep() {
     const workspaces = await this.prisma.client.workspace.findMany({ where: { deletedAt: null }, select: { id: true } });
     for (const ws of workspaces) {

@@ -1,23 +1,5 @@
 "use client";
 
-const ACCESS_TOKEN_KEY = "podium.accessToken";
-const REFRESH_TOKEN_KEY = "podium.refreshToken";
-
-export function getAccessToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(ACCESS_TOKEN_KEY);
-}
-
-export function setTokens(accessToken: string, refreshToken: string) {
-  window.localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  window.localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
-}
-
-export function clearTokens() {
-  window.localStorage.removeItem(ACCESS_TOKEN_KEY);
-  window.localStorage.removeItem(REFRESH_TOKEN_KEY);
-}
-
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -30,18 +12,21 @@ export class ApiError extends Error {
 }
 
 /**
- * Thin fetch wrapper. Tokens live in localStorage for this build (a
- * pragmatic dev-time choice — see docs/STATUS.md for why this isn't
- * httpOnly-cookie session auth yet). All requests go through the Next.js
- * rewrite at /api/* -> the NestJS API, so there's no CORS to manage.
+ * Thin fetch wrapper. Phase H: auth rides in an httpOnly cookie the API sets
+ * on login/refresh/accept-invite — the browser attaches it automatically to
+ * every same-origin request, so there is no token for this code to read or
+ * send by hand (and no way to: an httpOnly cookie is invisible to JS, which
+ * is the whole point — an injected script can no longer steal a live
+ * session the way it could out of localStorage). All requests go through
+ * the Next.js rewrite at /api/* -> the NestJS API, so the cookie is same-
+ * origin from the browser's perspective and fetch's default credentials
+ * mode ("same-origin") already includes it with no extra option needed.
  */
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getAccessToken();
   const res = await fetch(`/api${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init.headers,
     },
   });
@@ -58,20 +43,11 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 
 /**
  * Downloads a binary response (currently: invoice PDFs) and hands the
- * browser a file.
- *
- * Deliberately NOT a plain `<a href>`: the API authenticates from the
- * Authorization header, and the alternative — putting the access token in
- * the URL as a query parameter — would leak a live credential into browser
- * history, the Referer header and any intermediary's access logs. So the
- * fetch carries the header, and the resulting blob is handed to a synthetic
- * anchor that is revoked immediately afterwards.
+ * browser a file. The httpOnly session cookie is sent automatically, same
+ * as any other same-origin fetch — nothing to attach by hand.
  */
 export async function apiDownload(path: string, fallbackFilename: string): Promise<void> {
-  const token = getAccessToken();
-  const res = await fetch(`/api${path}`, {
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-  });
+  const res = await fetch(`/api${path}`);
   if (!res.ok) {
     const body = await res.json().catch(() => undefined);
     throw new ApiError(res.status, body?.error?.code ?? "UNKNOWN", body?.error?.message ?? res.statusText);
@@ -100,12 +76,7 @@ export async function apiDownload(path: string, fallbackFilename: string): Promi
  * forcing JSON there would silently corrupt every upload.
  */
 export async function apiUpload<T>(path: string, formData: FormData, method: "POST" = "POST"): Promise<T> {
-  const token = getAccessToken();
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: formData,
-  });
+  const res = await fetch(`/api${path}`, { method, body: formData });
   const body = await res.json().catch(() => undefined);
   if (!res.ok) {
     const err = body?.error;

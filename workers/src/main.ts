@@ -3,6 +3,8 @@ import { Queue, Worker, type Job } from "bullmq";
 import { config as loadEnv } from "dotenv";
 import { resolve } from "path";
 import { AppModule } from "@podium/api/src/app.module";
+import { AutomationScheduler } from "@podium/api/src/automation/automation.scheduler";
+import { FlowSlaService } from "@podium/api/src/flows/flow-sla.service";
 import { InvoicesService } from "@podium/api/src/invoices/invoices.service";
 import { createRedisConnection, QUEUE_NAMES, SCHEDULED_JOBS } from "./queues";
 
@@ -51,7 +53,29 @@ async function bootstrap() {
   );
   log(`scheduled ${SCHEDULED_JOBS.invoiceOverdueSweep} (daily 02:00)`);
 
+  // Phase H: these two were @nestjs/schedule crons running inside the API
+  // process (FlowSlaService, AutomationScheduler) — exactly the
+  // double-fires-across-instances problem this worker package exists to
+  // fix. Their own doc comments called this out as "the follow-up"; this is
+  // it. Same cadence as before (every minute / every 10 minutes), just
+  // scheduled once in Redis instead of once per running API process.
+  await queue.upsertJobScheduler(
+    SCHEDULED_JOBS.flowSlaSweep,
+    { pattern: "* * * * *" },
+    { name: SCHEDULED_JOBS.flowSlaSweep },
+  );
+  log(`scheduled ${SCHEDULED_JOBS.flowSlaSweep} (every minute)`);
+
+  await queue.upsertJobScheduler(
+    SCHEDULED_JOBS.automationTick,
+    { pattern: "*/10 * * * *" },
+    { name: SCHEDULED_JOBS.automationTick },
+  );
+  log(`scheduled ${SCHEDULED_JOBS.automationTick} (every 10 minutes)`);
+
   const invoices = app.get(InvoicesService);
+  const flowSla = app.get(FlowSlaService);
+  const automationScheduler = app.get(AutomationScheduler);
 
   const worker = new Worker(
     QUEUE_NAMES.scheduled,
@@ -60,6 +84,15 @@ async function bootstrap() {
         case SCHEDULED_JOBS.invoiceOverdueSweep: {
           const result = await invoices.sweepOverdue();
           log(`${job.name}: ${result.transitioned} invoice(s) -> OVERDUE`);
+          return result;
+        }
+        case SCHEDULED_JOBS.flowSlaSweep: {
+          const result = await flowSla.checkSlaBreaches();
+          if (result.escalated > 0) log(`${job.name}: ${result.escalated} flow step(s) escalated`);
+          return result;
+        }
+        case SCHEDULED_JOBS.automationTick: {
+          const result = await automationScheduler.sweep();
           return result;
         }
         default:
