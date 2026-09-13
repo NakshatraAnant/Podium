@@ -16,6 +16,13 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
     ],
   },
   {
+    label: "Sales & CRM",
+    items: [
+      { href: "/pipeline", icon: "⌬", label: "Pipeline" },
+      { href: "/leads", icon: "☍", label: "Leads" },
+    ],
+  },
+  {
     label: "Operations",
     items: [
       { href: "/projects", icon: "◧", label: "Projects" },

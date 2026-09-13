@@ -57,6 +57,13 @@ export class LeadsService {
     return { total, limit: take, offset: opts.offset ?? 0, rows };
   }
 
+  async get(user: RequestUser, id: string) {
+    const lead = await this.prisma.client.lead.findFirst({ where: { id, workspaceId: user.workspaceId, deletedAt: null } });
+    if (!lead) throw new NotFoundException("Lead not found.");
+    this.cityScope.assertCanAccessCity(user, lead.cityId);
+    return lead;
+  }
+
   async create(user: RequestUser, input: CreateLeadInput) {
     this.cityScope.assertCanAccessCity(user, input.cityId);
     return this.prisma.client.lead.create({

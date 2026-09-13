@@ -37,6 +37,13 @@ export const STATUS_PILL_COLOR: Record<string, "green" | "red" | "amber" | "blue
   DRAFT: "gray",
   REJECTED: "red",
   CANCELLED: "gray",
+  // Lead pipeline stages (Phase F.5).
+  LEAD: "gray",
+  QUALIFIED: "blue",
+  PROPOSAL: "amber",
+  NEGOTIATION: "amber",
+  WON: "green",
+  LOST: "red",
 };
 
 export const HEALTH_COLOR: Record<string, string> = { GREEN: "green", AMBER: "amber", RED: "red" };

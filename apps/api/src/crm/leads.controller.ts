@@ -36,6 +36,12 @@ export class LeadsController {
     });
   }
 
+  @Get(":id")
+  @RequirePermissions("leads:view")
+  get(@CurrentUser() user: RequestUser, @Param("id") id: string) {
+    return this.leads.get(user, id);
+  }
+
   @Post()
   @RequirePermissions("leads:create")
   @Audit("lead", "lead.create")

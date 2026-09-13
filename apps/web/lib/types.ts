@@ -417,3 +417,47 @@ export interface DocumentDto {
   createdAt: string;
   updatedAt: string;
 }
+
+// ----------------------------------------------------------- CRM / pipeline
+export type LeadStage = "LEAD" | "QUALIFIED" | "PROPOSAL" | "NEGOTIATION" | "WON" | "LOST";
+
+export interface LeadDto {
+  id: string;
+  name: string;
+  stage: LeadStage;
+  kind: "PIPELINE" | "COLD_PROSPECT";
+  value: string | number | null;
+  ownerId: string | null;
+  cityId: string | null;
+  contactName: string | null;
+  phone: string | null;
+  email: string | null;
+  company: string | null;
+  designation: string | null;
+  address: string | null;
+  eventType: string | null;
+  pax: number | null;
+  eventDate: string | null;
+  eventDateText: string | null;
+  remarks: string | null;
+  source: string | null;
+  convertedClientId: string | null;
+  convertedProjectId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LeadListResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  rows: LeadDto[];
+}
+
+/** Phase F.5's bare active-user list (GET /users) — only Founder/Admin/Operations can reach it. */
+export interface UserSummaryDto {
+  id: string;
+  name: string;
+  email: string;
+  roles: string[];
+}

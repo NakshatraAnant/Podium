@@ -9,6 +9,187 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-9 PHASE H — Infrastructure hardening: BullMQ sweeps, httpOnly cookies, real CI (2026-09-13)
+
+**OBJECTIVE:** Four infrastructure gaps flagged across earlier phases as
+"documented shortcuts, worth fixing before this goes further": in-process
+`@Cron` sweeps that would double-fire across multiple API instances,
+access/refresh tokens sitting in localStorage where an injected script
+could read them, a GitHub Actions workflow that had never actually
+executed end to end, and no staging deployment target. Close what's
+closeable; document what genuinely needs Anant's input.
+
+**WHAT CHANGED:**
+
+*BullMQ for the SLA/automation sweeps:* `FlowSlaService.checkSlaBreaches()`
+(every minute) and `AutomationScheduler.sweep()` (every 10 minutes) lost
+their `@Cron` decorators — `ScheduleModule` is gone from `AppModule`
+entirely (confirmed via grep: nothing else in `apps/api/src` used it).
+`workers/src/main.ts` now registers both as BullMQ job schedulers via
+`queue.upsertJobScheduler()` — idempotent on scheduler id, so however many
+API or worker processes are running, exactly one schedule exists in Redis
+and exactly one worker claims each tick. The sweep methods themselves are
+untouched; only the trigger moved, exactly as their own pre-existing doc
+comments already flagged as the follow-up. `workers/package.json` needed
+`@types/multer` added — its `tsconfig.json` transitively typechecks all of
+`apps/api/src` reachable from `AppModule`, which now includes
+`DocumentsController`'s multipart types from Phase F.
+
+*httpOnly cookies instead of localStorage:* the API now sets `accessToken`/
+`refreshToken` as httpOnly, `SameSite=Lax` cookies on login/refresh/accept-
+invite (via `cookie-parser` + `res.cookie()` in `AuthController`), sized to
+each token's real TTL. Every protected route accepts either the cookie or
+the existing `Authorization: Bearer` header — `JwtStrategy`'s
+`jwtFromRequest` tries the cookie first, falls back to the header — so all
+~24 existing e2e test files needed zero changes. `refreshSchema`'s
+`refreshToken` field became optional: a browser has no way to read an
+httpOnly value back into a request body, so `/auth/refresh` and
+`/auth/logout` now fall back to the cookie when the body omits it,
+rejecting with 400 only when neither is present. The web frontend
+(`lib/api.ts`, `lib/auth.tsx`, `app/page.tsx`) stops touching
+`localStorage` entirely: `apiFetch`/`apiUpload`/`apiDownload` no longer
+attach an `Authorization` header at all (the browser sends the cookie
+automatically on same-origin requests, and Next's `/api/*` rewrite keeps
+everything same-origin), and "is the user logged in" is now answered by
+calling `GET /users/me` rather than checking for a stored token.
+Deliberately NOT touched: the frontend still never calls `/auth/refresh`
+proactively (a pre-existing gap noted in an earlier phase) — fixing that
+would be a second, separate feature, not part of closing the localStorage
+XSS surface.
+
+*A real GitHub Actions CI run:* `ci.yml` only ever triggered on `main`
+push/PR, so it had never executed for any commit on this session's working
+branch — added `workflow_dispatch` (touches nothing about the automatic
+triggers) and used it to run CI for real, repeatedly, until it was
+actually green. It wasn't on the first try — see Phase H.2 below.
+
+**Phase H.1 (self-correcting sub-phase):** re-running the full suite for
+this phase surfaced a real, reproducible non-idempotency bug in
+`inventory.e2e-spec.ts`'s transfer test — it read the seeded Jaipur
+SP-VOD-AB balance and transferred 3 units out directly, so it passed on a
+freshly seeded database but drained the real balance by 3 on every
+subsequent run, until a run found less than 3 units left and got a
+genuine 400 "insufficient stock" instead of the expected 201 (confirmed:
+Jaipur's real balance was down to 1 unit). Fixed with the exact pattern
+already used earlier in the same file's CONSUME test: bring the source
+balance to a known quantity via real RECEIVE/CONSUME movements first, so
+the test is idempotent regardless of how many times it's run. Verified
+twice consecutively, then as part of the full suite three times.
+
+**Phase H.2 (self-correcting sub-phase):** triggering CI for the first
+time ever on this branch surfaced three more real, pre-existing
+defects in `ci.yml` itself, one per run, each fixed and re-verified before
+moving to the next:
+1. `pnpm/action-setup@v4`'s `version: 10` input conflicts outright with
+   `package.json`'s own `packageManager: "pnpm@10.33.0"` field ("Multiple
+   versions of pnpm specified") — removed the redundant input; the action
+   reads `packageManager` automatically.
+2. The seed script's own three-part safety guard (explicit env var +
+   `_dev`/`_ci`/`_test` name suffix + row-count check — see §1.1, which
+   this build must never weaken) refuses to run at all without
+   `PODIUM_ALLOW_DESTRUCTIVE_SEED=1`, which CI never set. Added it scoped
+   to just the seed step — `podium_ci_test` is a fresh, disposable,
+   correctly-named database every run, exactly what the guard exists to
+   allow through on explicit confirmation. The guard itself is untouched.
+3. `apps/api`'s `lint` script has always invoked the bare `eslint` binary,
+   but `apps/api/package.json` never declared `eslint` as its own
+   dependency (only `typescript-eslint`, which needs `eslint` as a peer
+   but doesn't ship the binary) — it only ever worked locally by accident,
+   via whatever got hoisted from `apps/web`'s own dependency into this
+   long session's accumulated `node_modules`. CI's clean, frozen-lockfile
+   install had no such accident and failed with "eslint: not found".
+   Fixed by declaring the dependency explicitly.
+
+None of these three were caused by this phase's own diff — they were
+latent defects in already-committed CI configuration, invisible until a
+real run was actually attempted, which is exactly why "get a real CI run"
+was on the list. Run 4
+(https://github.com/NakshatraAnant/Podium/actions/runs/34748718120)
+passed clean: lint, typecheck, build, and the full 190-test API suite,
+against the exact commit this report is describing (minus Phase F.5's
+later additions, re-verified separately below).
+
+**Staging deploy — OPEN DECISION, not defaulted, needs Anant's input:**
+investigated and confirmed no deployment target exists anywhere in this
+environment — no cloud credentials in `.env`/`.env.example`, no Vercel/
+container-platform config, and `ci.yml`'s own trailing comment has
+literally said "Placeholder for when a deployment target is chosen"
+since it was first written. There is nothing here for me to default
+conservatively on: standing up a real staging environment means picking a
+provider, provisioning real infrastructure, and likely spending real
+money — none of which is mine to decide unilaterally, and none of which
+is reversible the way a code default is. This is not a task I completed
+narrowly; it's one I'm explicitly flagging as blocked on information only
+Anant has (which provider, whose account, what budget).
+
+### What you actually ran
+
+- Full API e2e suite: 25 suites / 190 tests (183 pre-existing + 7 new
+  Phase F.5 tests — see below), run three times consecutively against
+  `podium_test` with no reseed, 190/190 every time.
+- `pnpm -r typecheck`, `pnpm -r lint`, `pnpm --filter @podium/api|web
+  build` — all clean, mirroring CI's own steps exactly before ever
+  pushing.
+- Live BullMQ verification: started the worker process for real (via
+  `run_in_background`, after an earlier attempt was killed prematurely by
+  a raw `nohup &`), confirmed both new schedulers registered in Redis, and
+  waited a genuine ~65 real wall-clock seconds (via a Redis
+  `completed`-set cardinality poll, cross-checked against the schedulers'
+  own stored repeat timestamps) to observe a real second tick of
+  `flow.sla-sweep` — not a log-line pattern match, an actual second
+  completion. Also observed, unplanned but valuable: two concurrent
+  `automationRun.create()` attempts hit the same unique constraint under
+  real load, and `runOnce()`'s existing `catch { return null; }` correctly
+  swallowed the loser — live proof the idempotency protection works under
+  real concurrency, not just in a unit test.
+- Live httpOnly-cookie verification: a real Playwright browser session
+  against `podium_dev` — logged in, confirmed `document.cookie` is empty
+  and `localStorage` holds no tokens, confirmed the real cookie jar shows
+  both cookies as `httpOnly`, reloaded the page and stayed authenticated
+  (session survives purely on the cookie), signed out, confirmed both
+  cookies were cleared server-side, and confirmed a fresh visit to
+  `/dashboard` after that redirects to `/login`. Caught and fixed two of
+  my own environment mistakes along the way: a stale orphaned API process
+  from much earlier in this session was still answering on port 3001 with
+  pre-Phase-H code (found no `Set-Cookie` header, traced it to the wrong
+  PID, killed it specifically rather than broadly); and `pnpm --filter
+  @podium/api dev`'s cwd change breaks `ConfigModule`'s default `.env`
+  resolution (a previously-documented trap, re-confirmed) — fixed by
+  invoking `ts-node` directly against `apps/api/src/main.ts` from the repo
+  root instead.
+- Real GitHub Actions runs: 4 attempts on this branch via
+  `workflow_dispatch`, each one read for its actual failure via
+  `get_job_logs`/`list_workflow_jobs` rather than guessed at; run 4 green.
+- `podium_prod` re-checked throughout: 52,024 clients / 15 users
+  unchanged; no destructive operation ever ran against it (the seed-guard
+  fix only touches CI's own disposable database).
+
+### What's still not done
+
+- Staging deploy — see the OPEN DECISION above; genuinely blocked on
+  information only Anant has.
+- The frontend still never calls `/auth/refresh` proactively — sessions
+  still simply expire after 15 minutes and force re-login, same as
+  before this phase. Documented as a known gap, not fixed here (would be
+  scope creep beyond closing the localStorage XSS surface).
+- CI's automatic triggers (`push`/`pull_request` on `main`) are unchanged
+  — `workflow_dispatch` only adds an on-demand path. Whether feature
+  branches like this one should also trigger CI automatically is the
+  OPEN DECISION recorded against the `ci.yml` commit; defaulted
+  conservatively to not changing it.
+
+### Known issues
+
+None beyond Phase H.1/H.2, fixed above.
+
+### Next step
+
+Phase F.5 (CRM/Pipeline frontend) follows immediately below, addressing an
+addendum received after this phase's own work was already underway — see
+that section for why it's dated after Phase H despite documenting a phase
+the addendum places earlier in the roadmap. Then Phase I (full frontend
+completion pass) per the standing instruction.
+
 ## 0.-8 PHASE G — Notifications + bell UI, chat @mention automation rule (2026-09-13)
 
 **OBJECTIVE:** `notifications` rows have been written by other modules
@@ -145,6 +326,146 @@ None beyond Phase G.1, fixed above.
 Continuing into Phase H (infrastructure hardening: BullMQ for automation/
 SLA sweep, httpOnly cookies instead of localStorage, real GitHub Actions
 CI run, staging deploy) per the standing instruction.
+
+## 0.-7.5 PHASE F.5 — CRM/Pipeline frontend (2026-09-13, added retroactively)
+
+**Note on placement:** this section is filed here — between Phase F and
+Phase G — because that's where Anant's addendum said it belongs in the
+build's logical order ("immediately after Documents, before
+Notifications"). It was actually *built* after Phase H, once the addendum
+arrived; Phase H's report above documents work that genuinely happened
+first. The addendum also resolved two of Phase E's open decisions with no
+code change required: PM-owned task/flow-step ownership on conversion
+stays permanent (not a placeholder — no role-based auto-routing to build
+speculatively), and `recipes:*` scoped to Founder/Admin/Operations is
+correct as shipped.
+
+**OBJECTIVE:** the CRM/Pipeline backend (leads, stage transitions, the
+Deal-Won automation, Phase E's playbook wiring) has been real and tested
+since Phase 2 — and had *zero* frontend surface. Every lead, every stage
+change, every conversion was only reachable via curl or the test suite.
+Correctly identified in the Phase E report as a gap, but the addendum is
+right that it's a missing product surface, not a line item to bury inside
+a general completion pass — it gets its own phase, same rigor as any
+other.
+
+**WHAT CHANGED:**
+
+*Two small backend additions, both needed by the frontend and neither
+existing before:*
+- `GET /leads/:id` (`LeadsController`/`LeadsService.get()`) — a lead-
+  detail endpoint never existed; only list, stage-change, mark-won and
+  convert did. Follows `ClientsService.get()`'s exact pattern: `leads:view`
+  permission, `cityScope.assertCanAccessCity()` on the lead's (nullable)
+  city, 404 for a missing/foreign-workspace row.
+- `GET /users` (`UsersController.list()`) — there was no way to list users
+  anywhere in this codebase (confirmed by grep before adding this), which
+  blocks any "pick a person" UI outside a project's own roster. Gated on
+  the existing `people` RBAC resource (already granted to Founder/Admin/
+  Operations — the same resource `POST /users/:id/invite` already uses),
+  returns `{id, name, email, roles}` for active users only. Sales, who
+  create leads but don't have `people:view`, aren't blocked by this: lead
+  creation isn't part of this phase's frontend (see "what's still not
+  done"), and the conversion flow that needs a PM picker is only reachable
+  by Founder/Admin, who already have `people:view` via their full-resource
+  grants — no RBAC seed change was needed.
+
+*Frontend (`apps/web/app/leads/page.tsx`, `app/leads/[id]/page.tsx`,
+`app/pipeline/page.tsx`):*
+- **Leads list** (`/leads`) — filterable by kind (Pipeline/Cold prospect,
+  defaulting to Pipeline exactly like `LeadsService.list()`'s own
+  docstring), stage, city, and name search; paged the same way
+  `/clients` already is. Row click → detail.
+- **Lead detail** (`/leads/:id`) — every field the schema carries
+  (contact, deal, remarks), a stage-change dropdown that excludes WON
+  (the server already refuses that target — see `LeadsService.updateStage`
+  — the UI just doesn't offer it), and a "Convert — mark Won" action.
+- **Convert panel** — the Deal-Won conversion form: new-client-by-name or
+  existing-client-by-search (a live `/clients?search=` lookup, not a
+  giant unpaged dropdown), project name/type/event date, a PM picker (via
+  the new `/users` endpoint), the playbook picker Phase E's backend wiring
+  had no UI for until now, and conditionally-shown city/value fields only
+  when the lead itself has neither (mirroring exactly which fields
+  `convertLeadSchema` makes optional-because-the-lead-supplies-them).
+- **Pipeline board** (`/pipeline`) — a Kanban-style view of the real ~200
+  pipeline opportunities (again, `LeadsService.list()`'s own docstring)
+  grouped into six stage columns with per-column totals, fetched at a
+  single high limit rather than paged — a board, not a paged table, which
+  is the shape this data was already designed for.
+- `AppShell` gained a "Sales & CRM" nav group (Pipeline, Leads), placed
+  before Operations since a lead precedes the project it becomes.
+- `StatusPill`'s shared color map (`@podium/ui`) gained the six lead
+  stages (LEAD gray, QUALIFIED blue, PROPOSAL/NEGOTIATION amber, WON
+  green, LOST red) — a small, additive extension of a map that already
+  existed for exactly this purpose.
+
+**What's still not done:**
+- No lead-creation UI. `createLeadSchema` requires `ownerId`, and the only
+  safe default without a picker (Sales, who'd actually create leads,
+  lacks `people:view`) would be "owner = creator" — a reasonable default,
+  but the addendum's explicit ask was list/detail/pipeline/convert, not
+  full lead CRUD, so it's left out rather than half-built. The ~200 real
+  pipeline leads and thousands of cold prospects already exist from the
+  real-data import; this only blocks adding genuinely new ones through
+  the UI.
+- No inline field editing on the detail page (value, contact info,
+  remarks) — there's no `PATCH /leads/:id` for arbitrary fields, only the
+  stage-specific endpoint. Out of scope for this phase.
+- The pipeline board has no drag-and-drop stage changes; moving a lead
+  still means opening its detail page. Simpler and consistent with every
+  other module's console-shaped design; a real Kanban drag interaction
+  wasn't asked for.
+
+### What you actually ran
+
+- `pnpm --filter @podium/api exec tsc --noEmit` and `pnpm --filter
+  @podium/web exec tsc --noEmit` — both clean. `pnpm --filter @podium/api
+  lint` and `pnpm --filter @podium/web lint` — both clean.
+- New `leads.e2e-spec.ts` (7 tests: lead detail found/404/RBAC-blocked/
+  city-scope-blocked/city-scope-allowed, `/users` allowed for Founder and
+  blocked for Sales) — run alone twice consecutively, then as part of the
+  full suite (25 suites / 190 tests) three times consecutively against
+  `podium_test` with no reseed, 190/190 every time.
+- Live verification against `podium_dev` with a real Playwright browser
+  session logged in as Anant Sharma (Founder): opened `/leads`, filtered
+  to LEAD stage, opened a real lead's detail page (owner name correctly
+  resolved from the new `/users` endpoint), opened `/pipeline` and
+  confirmed all six stage columns render with correct per-column counts
+  and totals against real data. Then ran an actual, complete Deal-Won
+  conversion through the UI — new client name, project details, a real PM
+  selected from the populated dropdown — and confirmed via direct
+  `podium_dev` query afterward that the project (status PLANNING, revenue
+  matching the lead's value), the new client row, and the PM's
+  notification ("New project from Won deal: …") were all genuinely
+  created; the lead's own row now reads stage=WON with a
+  `converted_project_id` pointing at the real new project, and the detail
+  page's "open the project" link resolves to it. Screenshots taken at
+  each step (list, detail, convert form, post-conversion state) and sent
+  to Anant alongside this report.
+- Caught and fixed one real, pre-existing environment defect while
+  restarting the web dev server for this verification: an earlier
+  `pnpm --filter @podium/web build` (run during Phase H's CI dry-run
+  parity check) had overwritten the *running* `next dev` server's `.next`
+  build cache with a production build, corrupting the dev server into
+  404-ing every static chunk. Not a code defect — a dev-workflow hazard
+  from running `next build` and `next dev` against the same `.next`
+  directory concurrently — fixed by killing the dev server, clearing
+  `.next`, and restarting clean.
+- `podium_prod` re-checked: 52,024 clients / 15 users unchanged (all
+  verification ran against `podium_dev`; `podium_dev`'s own `Bira 91 —
+  Monsoon Brand Pop-up` lead is now genuinely WON with a real converted
+  project and client, which is the intended, harmless side effect of
+  live-verifying against a fixture database rather than production).
+
+### Known issues
+
+None beyond the dev-cache hazard noted above, which isn't a code defect.
+
+### Next step
+
+Continuing to Phase I (full frontend completion pass) per the standing
+instruction — the CRM/pipeline gap this phase closed was one of the
+larger items that pass would otherwise have had to cover.
 
 ## 0.-7 PHASE F — Documents: storage driver, upload/versioning, UI (2026-09-13)
 
