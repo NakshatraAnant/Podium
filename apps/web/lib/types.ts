@@ -383,3 +383,27 @@ export interface RecipeDto {
   items: RecipeItemDto[];
   costing: RecipeCostingDto;
 }
+
+// -------------------------------------------------------------- documents
+export type DocumentType = "CONTRACT" | "DESIGN" | "CREATIVE" | "PURCHASE_ORDER" | "GOVERNMENT_PERMIT" | "GUEST_LIST" | "OTHER";
+
+export interface DocumentVersionDto {
+  id: string;
+  versionNo: number;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedById: string;
+  createdAt: string;
+}
+
+export interface DocumentDto {
+  id: string;
+  name: string;
+  type: DocumentType;
+  projectId: string | null;
+  project: { id: string; name: string } | null;
+  versions: DocumentVersionDto[];
+  createdAt: string;
+  updatedAt: string;
+}

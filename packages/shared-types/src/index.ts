@@ -2,6 +2,7 @@ export * from "./auth";
 export * from "./chat";
 export * from "./clients";
 export * from "./common";
+export * from "./documents";
 export * from "./leads";
 export * from "./playbooks";
 export * from "./procurement";

@@ -21,6 +21,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
       { href: "/tasks", icon: "☑", label: "Tasks" },
       { href: "/risks", icon: "⚠", label: "Risks & Issues" },
       { href: "/playbooks", icon: "❧", label: "Playbooks" },
+      { href: "/documents", icon: "▧", label: "Documents" },
     ],
   },
   {

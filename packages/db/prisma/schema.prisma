@@ -1504,12 +1504,19 @@ model Document {
 }
 
 model DocumentVersion {
-  id          String   @id @default(uuid()) @db.Uuid
-  documentId  String   @map("document_id") @db.Uuid
-  versionNo   Int      @map("version_no")
-  storageKey  String   @map("storage_key")
-  uploadedById String  @map("uploaded_by") @db.Uuid
-  createdAt   DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid()) @db.Uuid
+  documentId   String   @map("document_id") @db.Uuid
+  versionNo    Int      @map("version_no")
+  storageKey   String   @map("storage_key")
+  // Phase F: a storage key alone can't round-trip a real file — a download
+  // needs the original filename and MIME type back, and a list view needs
+  // the size without touching the storage driver. Added with this phase's
+  // upload endpoint since there was no prior code depending on their absence.
+  fileName     String   @map("file_name")
+  mimeType     String   @map("mime_type")
+  sizeBytes    Int      @map("size_bytes")
+  uploadedById String   @map("uploaded_by") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
 
   document Document @relation(fields: [documentId], references: [id])
 

@@ -736,9 +736,24 @@ async function main() {
       data: { projectId: projectByKey[a.proj].id, title: a.title, type: a.type, requesterId: userByKey[a.requester].id, approverRef: a.approver, status: a.status },
     });
   }
+  // Demo metadata only -- no real file backs any of these on disk, so
+  // sizeBytes is honestly 0 rather than a fabricated number (mirrors the
+  // Phase F migration's backfill for the same pre-existing rows).
+  const guessMimeType = (name: string): string => {
+    if (name.endsWith(".pdf")) return "application/pdf";
+    if (name.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    if (name.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    return "application/octet-stream";
+  };
   for (const d of DOCUMENTS) {
     const doc = await db.document.create({ data: { workspaceId: workspace.id, projectId: projectByKey[d.proj].id, name: d.name, type: d.type, createdById: userByKey[d.by].id } });
-    await db.documentVersion.create({ data: { documentId: doc.id, versionNo: 1, storageKey: `local/${doc.id}/v1/${d.name}`, uploadedById: userByKey[d.by].id } });
+    await db.documentVersion.create({
+      data: {
+        documentId: doc.id, versionNo: 1, storageKey: `local/${doc.id}/v1/${d.name}`,
+        fileName: d.name, mimeType: guessMimeType(d.name), sizeBytes: 0,
+        uploadedById: userByKey[d.by].id,
+      },
+    });
   }
 
   // --- SOPs -------------------------------------------------------------

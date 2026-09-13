@@ -9,6 +9,131 @@ authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
 
+## 0.-7 PHASE F — Documents: storage driver, upload/versioning, UI (2026-09-13)
+
+**OBJECTIVE:** `documents`/`document_versions` existed as schema-only tables
+with zero API surface. Build a real storage abstraction, wire upload/
+versioning/download through it, and build the UI.
+
+**WHAT CHANGED:**
+
+*Storage driver:* `apps/api/src/common/storage/` — `StorageDriver`
+interface (`put`/`get`/`delete`), `LocalStorageDriver` (disk-backed, path-
+traversal-checked), `StorageModule` providing it via a `STORAGE_DRIVER`
+token selected by the `STORAGE_DRIVER` env var. `.env`'s comment ("local
+uses disk storage behind the same interface as S3") already anticipated
+this shape. Only `local` is implemented — there are no real S3 credentials
+anywhere in this build, and a second, never-exercised driver behind the
+same interface would be dead code, not a real capability. `StorageModule`
+fails fast at startup for any other `STORAGE_DRIVER` value rather than
+silently falling back or no-opping.
+
+*Schema:* `document_versions` had `storageKey` but no `fileName`/
+`mimeType`/`sizeBytes` — a download couldn't hand back a real filename or
+content-type, and a list view had no size without going through the
+storage driver. Migration `20260913000000_document_versions_metadata`
+adds all three; `podium_dev`/`podium_test` already carried 7 seeded rows
+(demo metadata only, no real backing file), so the migration backfills
+`file_name` from the parent document's own name, guesses `mime_type` from
+the extension, and sets `size_bytes` to the honest value for a row with no
+real file: 0, not a fabricated number. `podium_prod` had zero rows, so its
+backfill is a no-op. `seed.ts` updated to populate these fields on future
+fresh seeds.
+
+*Documents module (new):* `packages/shared-types/src/documents.ts`,
+`apps/api/src/documents/*` — list (workspace-wide or `?projectId=`
+filtered), get, upload (multipart via `FileInterceptor`, 25MB cap),
+add-version, download (streams the real file with a real
+`Content-Disposition`), soft-delete. A project-scoped document is
+city-scoped through its project; a workspace-level document (no project)
+is visible to anyone with `documents:view`, same standing as vendors/
+playbooks. `documents` was already an RBAC resource from the start of this
+build — no new permission backfill needed this phase.
+
+*Frontend:* `apps/web/lib/api.ts` gained `apiUpload()` — a real multipart
+POST helper, deliberately not routed through the existing `apiFetch()`,
+which forces `Content-Type: application/json` unconditionally and would
+have silently corrupted every upload. New `components/DocumentsPanel.tsx`
+(list, upload form, add-version, expandable version history, download,
+delete) used two places: standalone at `/documents` (workspace-wide, with
+a project picker on upload) and as a new "Documents" tab on the project
+detail page (pre-scoped to that project, no picker shown).
+
+### Phase F.1 — a fire-and-forget audit write raced my own test under full-suite load
+
+Found running the full suite after adding the Documents tests: the
+"every mutation wrote an audit_logs row" test passed every time run alone,
+but failed intermittently (`0` rows found) only when the full 21-suite
+run put real CPU contention on the process. Root cause: I had used the
+`@Audit()` decorator on the Documents endpoints, which writes its row via
+`AuditInterceptor` — genuinely fire-and-forget (`tap()` calling
+`.create().catch()` with no `await`, by design, so an audit outage never
+blocks or fails the response). Under light load the detached write
+reliably lands before a test's own immediate follow-up query; under real
+contention, it doesn't always. This is the exact scenario the codebase
+already has an established, correct pattern for — `ExpensesService.
+decide()`/`ApprovalsService.decide()` write their audit rows inline,
+awaited, inside their own transaction specifically to avoid this class of
+race — and Documents' mutations (`create`/`addVersion`/`remove`) already
+ran inside transactions, so adopting the same pattern was a direct,
+narrow fix: removed the three `@Audit()` decorators, added the equivalent
+`tx.auditLog.create()` calls inline. Full suite run three times
+consecutively after the fix: 168/168 all three times (extra run beyond
+the usual two, specifically because this was a flakiness fix).
+
+### What you actually ran
+
+- `pnpm --filter @podium/shared-types|api|web exec tsc --noEmit` — all
+  three clean.
+- Prisma migration workflow followed exactly as established: shadow DB
+  dropped/recreated, all 9 prior migrations replayed onto it, diffed
+  against the updated schema, migration hand-written (the diff tool also
+  proposed an unrelated `budgets.updated_at DROP DEFAULT` — pre-existing
+  drift from an earlier manual migration edit, deliberately excluded to
+  keep this migration scoped to its stated purpose), applied to
+  `podium_dev_shadow`, `podium_dev`, `podium_test`, and `podium_prod` in
+  that order.
+- Full e2e suite: 21 suites / 168 tests (8 new Documents tests), run twice
+  consecutively against `podium_test` with no reseed before the F.1 fix
+  (revealing the flake), then three times after — 168/168 every time
+  post-fix.
+- Live verification against `podium_dev`: Playwright drove a real Chromium
+  browser through the full round trip — upload a workspace-level document,
+  download it and diff the bytes against the original file on this
+  machine (byte-identical, confirmed programmatically not just visually),
+  add a second version, expand version history, upload a project-scoped
+  document via the new Documents tab, delete it. Screenshots taken.
+  Independently confirmed via `find .local-storage` that the uploaded
+  bytes are real files on disk at the expected `local/<docId>/v<n>/
+  <filename>` paths, not just database rows.
+- `podium_prod` re-checked throughout: 52,024 clients / 15 users / 0
+  documents unchanged (all verification ran against `podium_dev`; the
+  migration itself is prod's only touch this phase, and it's a schema-only,
+  zero-row-affected change there).
+
+### What's still not done
+
+- No document preview (PDF/image inline view) — download-only, matching
+  what was actually asked for ("upload, storage driver, versioning, UI"),
+  not scope-expanded into a viewer.
+- No per-document-type validation (e.g. requiring a GST-compliant format
+  for `GOVERNMENT_PERMIT`) — every type accepts any file, which matches
+  the schema's own lack of such a constraint.
+- The 7 pre-existing seeded `document_versions` rows have no real backing
+  file on disk (they never did — seed data was always metadata-only) and
+  will 404 on download. This is a pre-existing seed-data gap the migration
+  made visible rather than introduced; flagging it rather than fabricating
+  fake files to paper over it.
+
+### Known issues
+
+None beyond Phase F.1, fixed above.
+
+### Next step
+
+Continuing into Phase G (Notifications endpoint + bell UI, chat @mention
+→ task automation rule) per the standing instruction.
+
 ## 0.-6 PHASE E — Playbooks CRUD, Deal-Won wiring, Menu costing (2026-09-12)
 
 **OBJECTIVE:** Build Playbooks as a real CRUD module (they existed only as a

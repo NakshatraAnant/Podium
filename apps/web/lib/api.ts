@@ -93,6 +93,27 @@ export async function apiDownload(path: string, fallbackFilename: string): Promi
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Multipart upload — deliberately NOT apiFetch(), which forces
+ * `Content-Type: application/json` unconditionally. FormData needs the
+ * browser to set its own `multipart/form-data; boundary=...` header itself;
+ * forcing JSON there would silently corrupt every upload.
+ */
+export async function apiUpload<T>(path: string, formData: FormData, method: "POST" = "POST"): Promise<T> {
+  const token = getAccessToken();
+  const res = await fetch(`/api${path}`, {
+    method,
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: formData,
+  });
+  const body = await res.json().catch(() => undefined);
+  if (!res.ok) {
+    const err = body?.error;
+    throw new ApiError(res.status, err?.code ?? "UNKNOWN", err?.message ?? res.statusText, err?.details);
+  }
+  return body as T;
+}
+
 export const api = {
   get: <T>(path: string) => apiFetch<T>(path),
   post: <T>(path: string, data?: unknown) => apiFetch<T>(path, { method: "POST", body: data ? JSON.stringify(data) : undefined }),

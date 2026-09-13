@@ -23,6 +23,7 @@ import { InventoryModule } from "./inventory/inventory.module";
 import { InvoicesModule } from "./invoices/invoices.module";
 import { GoogleModule } from "./google/google.module";
 import { AutomationModule } from "./automation/automation.module";
+import { DocumentsModule } from "./documents/documents.module";
 import { EventDayModule } from "./eventday/eventday.module";
 import { PlaybooksModule } from "./playbooks/playbooks.module";
 import { ProcurementModule } from "./procurement/procurement.module";
@@ -48,6 +49,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     ClientsModule,
     CrmModule,
     AutomationModule,
+    DocumentsModule,
     EventDayModule,
     GoogleModule,
     ProcurementModule,
