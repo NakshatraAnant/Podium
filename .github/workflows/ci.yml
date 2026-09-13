@@ -76,8 +76,20 @@ jobs:
       - name: Run database migrations
         run: pnpm --filter @podium/db exec prisma migrate deploy
 
+      # Phase H.2 (self-correcting sub-phase, continued): the seed script's
+      # own three-part guard (explicit env var + _dev/_ci/_test name suffix +
+      # row-count check — see packages/db/prisma/seed.ts's assertSafeToSeed,
+      # which must stay exactly this strict) refuses to run at all without
+      # PODIUM_ALLOW_DESTRUCTIVE_SEED=1. CI never set it, so this step had
+      # never actually succeeded — invisible until a real run was triggered.
+      # Scoped to just this step, not the whole job: it's the only place
+      # that needs it, and podium_ci_test is a fresh, disposable, correctly-
+      # named database each run, exactly the case the guard is designed to
+      # let through on explicit confirmation.
       - name: Seed the CI database (dev fixture — never production data, see blueprint §37)
         run: pnpm --filter @podium/db seed
+        env:
+          PODIUM_ALLOW_DESTRUCTIVE_SEED: "1"
 
       - name: Typecheck
         run: pnpm -r typecheck
