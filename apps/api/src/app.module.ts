@@ -19,6 +19,7 @@ import { PrismaModule } from "./common/prisma/prisma.module";
 import { FinanceModule } from "./finance/finance.module";
 import { FlowsModule } from "./flows/flows.module";
 import { GovernanceModule } from "./governance/governance.module";
+import { HealthModule } from "./health/health.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { InvoicesModule } from "./invoices/invoices.module";
 import { GoogleModule } from "./google/google.module";
@@ -59,6 +60,7 @@ import { VendorsModule } from "./vendors/vendors.module";
     ThrottlerModule.forRoot({ throttlers: [{ ttl: 60_000, limit: 120 }] }),
     PrismaModule,
     CommonModule,
+    HealthModule,
     MailModule,
     AuthModule,
     ChatModule,
