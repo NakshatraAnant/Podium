@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
+import { resolve } from "node:path";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { AuthModule } from "./auth/auth.module";
 import { ChatModule } from "./chat/chat.module";
@@ -36,7 +37,25 @@ import { VendorsModule } from "./vendors/vendors.module";
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    /**
+     * The env file is resolved from this file's own location, never from
+     * `process.cwd()`. `pnpm --filter @podium/api dev` (and `pnpm dev:api`,
+     * which delegates to it) runs with cwd = apps/api, so the default
+     * cwd-relative lookup silently missed the monorepo-root `.env` the
+     * README tells you to create — the API then died on boot with
+     * `Configuration key "JWT_ACCESS_SECRET" does not exist`, which reads
+     * like a missing secret rather than a file the loader never opened.
+     *
+     * Both entries below resolve to the repo root: `__dirname` is
+     * apps/api/src under ts-node/`nest start`, and apps/api/dist once
+     * compiled — three levels up either way. A cwd-relative `.env` is kept
+     * last so running from the repo root still works, and real process env
+     * vars (CI, Docker) always win over anything in a file.
+     */
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: [resolve(__dirname, "../../../.env"), ".env"],
+    }),
     ThrottlerModule.forRoot({ throttlers: [{ ttl: 60_000, limit: 120 }] }),
     PrismaModule,
     CommonModule,

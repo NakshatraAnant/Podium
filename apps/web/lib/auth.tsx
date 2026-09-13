@@ -2,10 +2,35 @@
 
 import type { AuthTokens } from "@podium/shared-types";
 import { useRouter } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { api } from "./api";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { api, refreshSession } from "./api";
 
 type CurrentUser = AuthTokens["user"];
+
+/**
+ * Session keep-alive (see also the retry-on-401 path in lib/api.ts).
+ *
+ * The access cookie's TTL is JWT_ACCESS_TTL, 15 minutes by default. Before
+ * this, nothing ever called /auth/refresh, so a user who had the app open
+ * and was actively working was thrown back to the login screen every 15
+ * minutes mid-task.
+ *
+ * Refreshing every 10 minutes leaves 5 minutes of headroom against that
+ * default — enough that a slow request or a briefly-throttled timer can't
+ * let the token lapse. The interval is deliberately *not* derived from the
+ * token: it's httpOnly, so this code cannot read its expiry, and guessing
+ * from a hardcoded TTL that someone later lowers in .env would be worse
+ * than useless. api.ts's retry-on-401 is what makes any mismatch safe.
+ *
+ * The activity gate is what preserves "an inactive session still expires".
+ * A tab left open overnight sees no pointer or key events, so the tick
+ * below stops refreshing and the session lapses exactly as designed —
+ * this keeps sessions alive for people, not for idle browser tabs.
+ */
+const REFRESH_EVERY_MS = 10 * 60 * 1000;
+const ACTIVE_WITHIN_MS = 10 * 60 * 1000;
+const TICK_MS = 60 * 1000;
+const ACTIVITY_EVENTS = ["pointerdown", "keydown", "scroll", "focus"] as const;
 
 interface AuthContextValue {
   user: CurrentUser | null;
@@ -40,6 +65,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
+  const lastActivityAt = useRef(Date.now());
+  const lastRefreshAt = useRef(Date.now());
+
+  useEffect(() => {
+    if (!user) return;
+
+    const noteActivity = () => {
+      lastActivityAt.current = Date.now();
+    };
+    for (const event of ACTIVITY_EVENTS) window.addEventListener(event, noteActivity, { passive: true });
+
+    const tick = window.setInterval(() => {
+      const now = Date.now();
+      if (now - lastRefreshAt.current < REFRESH_EVERY_MS) return;
+      if (now - lastActivityAt.current > ACTIVE_WITHIN_MS) return; // idle — let it expire
+      // Marked before the await so a slow refresh can't queue a second tick.
+      lastRefreshAt.current = now;
+      void refreshSession().then((alive) => {
+        // A dead refresh token means the session is genuinely over (revoked,
+        // password changed, or 30 days elapsed). Drop the user here rather
+        // than waiting for their next click to fail.
+        if (!alive) setUser(null);
+      });
+    }, TICK_MS);
+
+    return () => {
+      for (const event of ACTIVITY_EVENTS) window.removeEventListener(event, noteActivity);
+      window.clearInterval(tick);
+    };
+  }, [user]);
+
   const login = useCallback(
     async (email: string, password: string) => {
       // The response still carries accessToken/refreshToken in the body for
@@ -47,6 +103,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // API's Set-Cookie header on this same response already planted the
       // httpOnly session cookie.
       const res = await api.post<AuthTokens>("/auth/login", { email, password });
+      // Start the keep-alive clock from this login, not from whenever the
+      // provider happened to mount — someone can sit on the login screen
+      // for longer than a refresh interval before signing in.
+      lastActivityAt.current = Date.now();
+      lastRefreshAt.current = Date.now();
       setUser(res.user);
       router.push("/dashboard");
     },

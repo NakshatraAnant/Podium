@@ -80,6 +80,26 @@ describe("Cookie-based auth (e2e)", () => {
     await request(app.getHttpServer()).post("/api/auth/refresh").send({}).expect(400);
   });
 
+  /**
+   * The reason lib/api.ts funnels every caller through one shared in-flight
+   * refresh: rotation means the *second* concurrent refresh would present a
+   * token the first one already revoked, and get this 401 — logging out a
+   * user for the crime of having six queries on screen at once. Pinned here
+   * so the rotation semantics that dedup depends on can't change silently.
+   */
+  it("a refresh token that has already been rotated away is rejected", async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post("/api/auth/login")
+      .send({ email: "anant.sharma@ammbrands.in", password: "Podium123!" })
+      .expect(201);
+    const firstRefreshToken = loginRes.body.refreshToken as string;
+
+    await request(app.getHttpServer()).post("/api/auth/refresh").send({ refreshToken: firstRefreshToken }).expect(201);
+
+    // Same token, second time — it was revoked by the rotation above.
+    await request(app.getHttpServer()).post("/api/auth/refresh").send({ refreshToken: firstRefreshToken }).expect(401);
+  });
+
   it("logs out via the cookie alone, clears both cookies, and the session stops working", async () => {
     const agent = request.agent(app.getHttpServer());
     await agent

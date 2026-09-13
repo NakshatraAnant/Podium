@@ -5,18 +5,18 @@
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
-    "generate": "prisma generate",
-    "migrate": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy",
-    "seed": "ts-node --transpile-only prisma/seed.ts",
-    "studio": "prisma studio",
+    "generate": "node scripts/with-root-env.cjs prisma generate",
+    "migrate": "node scripts/with-root-env.cjs prisma migrate dev",
+    "migrate:deploy": "node scripts/with-root-env.cjs prisma migrate deploy",
+    "seed": "node scripts/with-root-env.cjs ts-node --transpile-only prisma/seed.ts",
+    "studio": "node scripts/with-root-env.cjs prisma studio",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(no lint configured for @podium/db yet)\"",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "prisma": {
-    "seed": "ts-node --transpile-only prisma/seed.ts"
+    "seed": "node scripts/with-root-env.cjs ts-node --transpile-only prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.19.1",
