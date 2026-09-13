@@ -2,13 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `claude/**` covers the session branches this build is developed on, so
+    # every push gets a real CI signal without anyone remembering to trigger
+    # one by hand — the gap that let three latent ci.yml defects survive
+    # unnoticed until Phase H first ran this workflow for real.
+    branches: [main, "claude/**"]
   pull_request:
     branches: [main]
-  # Phase H: lets a real run be triggered on demand against any branch
-  # (e.g. from the GitHub Actions UI or API) without changing what triggers
-  # CI automatically for anyone else — the push/pull_request triggers above
-  # are unchanged.
+  # Kept from Phase H: an on-demand run against any ref, for branches the
+  # push filter above doesn't cover.
   workflow_dispatch: {}
 
 env:
