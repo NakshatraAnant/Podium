@@ -1,6 +1,8 @@
 # Podium v2 — Build Status
 
-*Last updated: after the real-data import (2026-09-11) that replaced the
+*Last updated: after the 2026-09-15 data reset to the real source of truth
+(§0.-12) — `podium_dev` reset and re-imported, `podium_prod` paused pending
+go-ahead. Before that: the real-data import (2026-09-11) that replaced the
 development seed fixture with AMM Brands' actual client, vendor, staffing
 and pipeline records — see §0.0 below. The production-readiness audit that
 precedes it (§0.1) re-verified everything by actually running it: real
@@ -8,6 +10,73 @@ requests, real database queries, real test runs. This file is the
 authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
+
+## 0.-12 DATA RESET to the real source of truth (2026-09-15) — dev done, prod PAUSED
+
+**Full report: `docs/data-reset-2026-09-15.md`.** Summary of what is now true:
+
+*The premise did not survive contact with the files.* The "full database
+export" uploaded on 09-15 is **byte-identical** (md5 `68a453ab…`) to the
+workbook already imported on 09-11, and the Elixir refresh adds 6 net rows.
+Measured against the files, 63,781 of `podium_prod`'s 65,108 business records
+are still backed, and the only records matching nothing are literal
+placeholders (`NA`, `.`, `A`). **Zero real records in prod are stale.**
+
+*`podium_dev` was a different story and was reset.* All 43 of its business
+records were the seed fixture, backed by nothing — 517 rows across 51 tables
+deleted in one transaction, then re-imported from the new files: 52,024
+clients / 12,756 leads / 163 vendors / 171 crew. Schema, RBAC, automation
+rules, flow templates, playbooks, SOPs, recipes and the inventory catalogue
+all kept, as the directive requires. Verified live in the browser twice, and
+by the absence of named fixture records rather than by counts.
+
+*`podium_prod` is untouched and paused* pending go-ahead on the reconciliation
+— see §7 of the report. The lower-risk alternative is on the table: the
+importer is additive and idempotent, so the 6 new leads can be added to prod
+with no deletion at all.
+
+**Three things need Anant's input before this finishes:**
+
+1. **The employee list cannot produce user accounts.** `AMM EMPLOYEE DATA` is
+   a 177-row event-day crew roster — NAME / MOBILE NO / CATEGORY, every
+   category `BARTENDER`, `HOOKAH BOY` or `FOOD CATERING` — with **zero e-mail
+   addresses anywhere in the sheet**. Those 171 people are already in Podium,
+   correctly, as `Freelancer` records. Separately, the 15 "real" accounts are
+   byte-identical between dev and prod: they are the seed fixture's invented
+   people. They were **kept**, because deleting them without a replacement
+   leaves a system nobody can log into. Needed: a list of who should actually
+   have a login (name, e-mail, role, city) — likely 10–20 people, not 177.
+2. **The event calendar has no status column.** 303 distinct events (the three
+   month sheets are wholly contained in the master — 0 rows unique to them),
+   but nothing in the file says won/quoted/confirmed/cancelled, so
+   `Project` vs `Lead` cannot be inferred. Not guessed; not yet imported.
+3. **Is the prod wipe still wanted**, given §0 above?
+
+*Two pre-existing product gaps surfaced while verifying, unrelated to the
+reset:* there is **no People/crew screen at all** (no `/people` route, no
+freelancers module in the API — the 171 crew are database-only), and
+**clients have no detail page** (rows are plain `<tr>`). An earlier version of
+my own verification script passed its People check against a 404 page; that
+false pass is now an explicit 404 assertion.
+
+*The sensitive-data guard was widened* from one category (credentials, sheet
+names) to four — credentials, salary, bank account, government ID — at sheet
+**and** column level, with a two-pass read so a refused sheet is never
+decompressed into memory. Scanned 3 files / 82 sheets / 1,159,890 cells;
+excluded exactly one thing: the sheet ``LOGIN I`D AND PASSWORDS LIST``, never
+opened. No column matched. A first-draft bank pattern matching bare `BANK`
+was caught flagging *address* columns (Indian addresses use bank branches as
+landmarks) and tightened to require account context — with a regression test
+on the exact address strings that tripped it.
+
+*Backups (taken and restore-tested before anything was deleted):* timestamped
+`pg_dump`s of both databases under `/home/user/podium-backups/data-reset-20260915/`,
+with the prod dump **actually restored** into a scratch database and verified
+at 52,024 clients before being dropped. Durability caveat stated in the
+report: the container is ephemeral, so real off-box storage is still needed.
+
+**Tests: 200/200 passing** (+3 covering the widened guard). `podium_test` was
+never wiped or re-imported.
 
 ## 0.-11 LOCAL DEVELOPMENT — made to actually work, from a clean clone (2026-09-13)
 

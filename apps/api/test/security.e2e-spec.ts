@@ -92,19 +92,31 @@ describe("Security: PII in logs, and the forbidden-sheet guard", () => {
  * THROWS rather than skipping, precisely so a refactor that starts reading it
  * fails loudly instead of quietly succeeding — and this test would catch a
  * regression that turned the throw back into a skip.
+ *
+ * The 2026-09-15 data reset widened the rule from credentials alone to four
+ * categories — credentials, salary, bank account, government ID — and from
+ * sheets to columns, since an employee list carries those as columns inside
+ * an otherwise importable sheet. The tests below cover both halves: a guard
+ * that silently stopped matching a category would be indistinguishable from
+ * one that never covered it.
  */
 describe("Forbidden credentials sheet guard", () => {
   // Imported lazily so this file has no hard dependency on the import script's
   // runtime (it talks to Prisma at module load).
   let assertNotForbidden: (name: string) => void;
+  let sensitiveColumnCategory: (header: string) => string | null;
 
   beforeAll(async () => {
-    const mod = await import("../../../scripts/forbidden-sheet");
-    assertNotForbidden = (mod as unknown as { assertNotForbidden: (n: string) => void }).assertNotForbidden;
+    const mod = (await import("../../../scripts/forbidden-sheet")) as unknown as {
+      assertNotForbidden: (n: string) => void;
+      sensitiveColumnCategory: (h: string) => string | null;
+    };
+    assertNotForbidden = mod.assertNotForbidden;
+    sensitiveColumnCategory = mod.sensitiveColumnCategory;
   });
 
   it("throws on the exact sheet name from the AMM workbook", () => {
-    expect(() => assertNotForbidden("LOGIN I`D AND PASSWORDS LIST")).toThrow(/credentials/i);
+    expect(() => assertNotForbidden("LOGIN I`D AND PASSWORDS LIST")).toThrow(/never be opened/i);
   });
 
   it("throws on plausible variants, not just the one literal name", () => {
@@ -116,6 +128,49 @@ describe("Forbidden credentials sheet guard", () => {
       "Staff Passwords 2026",
     ]) {
       expect(() => assertNotForbidden(name)).toThrow();
+    }
+  });
+
+  it("throws on whole sheets about pay, banking or government identity", () => {
+    for (const name of ["SALARY SHEET", "Payroll Mar 2026", "CTC", "Bank Account Details", "AADHAAR COPIES", "PAN CARD NO"]) {
+      expect(() => assertNotForbidden(name)).toThrow();
+    }
+  });
+
+  it("classifies sensitive COLUMN headers by category", () => {
+    const cases: Array<[string, string]> = [
+      ["Password", "credential"],
+      ["API Key", "credential"],
+      ["Monthly Salary", "salary"],
+      ["CTC", "salary"],
+      ["In-Hand", "salary"],
+      ["Bank A/C No", "bank-account"],
+      ["IFSC", "bank-account"],
+      ["Account Number", "bank-account"],
+      ["Aadhaar", "government-id"],
+      ["PAN", "government-id"],
+      ["Passport", "government-id"],
+    ];
+    for (const [header, category] of cases) {
+      expect([header, sensitiveColumnCategory(header)]).toEqual([header, category]);
+    }
+  });
+
+  it("does NOT flag ordinary columns — including addresses that name a bank as a landmark", () => {
+    for (const header of [
+      "NAME",
+      "MOBILE NO",
+      "CATEGORY",
+      "Contact Person",
+      "Location",
+      // Indian addresses use bank branches as landmarks constantly. A guard
+      // that matched bare "BANK" would blank out whole address columns, so
+      // this is a real regression test, not a formality.
+      "ADDRESS",
+      "1st Floor Pulse Plaza K-24 Near HSBC Bank, Sector 18, Noida",
+      "M29, GK2, M Block Market, next to HDFC Bank, New Delhi",
+    ]) {
+      expect([header, sensitiveColumnCategory(header)]).toEqual([header, null]);
     }
   });
 

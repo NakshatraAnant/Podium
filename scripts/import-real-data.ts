@@ -40,8 +40,15 @@ import { assertNotForbidden } from "./forbidden-sheet";
 const prisma = new PrismaClient();
 
 const UPLOADS = process.env.PODIUM_IMPORT_DIR ?? "/root/.claude/uploads/3f727242-cd2a-50a4-8be4-56242dfab268";
-const AMM_FILE = path.join(UPLOADS, "1ed6d4fe-AMM_BRANDS_LLP_DATABASE.xlsx");
-const ELIXIR_FILE = path.join(UPLOADS, "566b3ed1-Elixir_New_Clients_Query.xlsx");
+/**
+ * The 2026-09-15 source-of-truth refresh. `AMM_BRANDS_LLP_DATABASE_1.xlsx` is
+ * byte-identical to the 2026-09-11 upload it replaces (verified by md5), so
+ * pointing at it changes nothing for clients, vendors or crew; the Elixir
+ * workbook is a genuine refresh, carrying three new intake-form responses and
+ * three new funnel rows. Overridable so a later refresh needs no code change.
+ */
+const AMM_FILE = path.join(UPLOADS, process.env.PODIUM_AMM_FILE ?? "f4544bcd-AMM_BRANDS_LLP_DATABASE_1.xlsx");
+const ELIXIR_FILE = path.join(UPLOADS, process.env.PODIUM_ELIXIR_FILE ?? "8d3abe94-Elixir_New_Clients_Query_1.xlsx");
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const CHUNK = 2_000;
