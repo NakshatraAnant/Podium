@@ -35,26 +35,47 @@ by the absence of named fixture records rather than by counts.
 importer is additive and idempotent, so the 6 new leads can be added to prod
 with no deletion at all.
 
-**Three things need Anant's input before this finishes:**
+*Employees are now real (second pass, same day).* `KRA_Sheet__2.xlsx` supplied
+the staff list the earlier upload lacked: **25 people** across Green Park
+Office, Dehradun, Rajasthan and the Warehouse. All 25 have accounts in
+`podium_dev` with login IDs minted on AMM's `first.last@ammbrands.in`
+convention (the sheet contains no e-mail addresses), single-use passwords
+generated from `crypto.randomBytes` — never from anything in the spreadsheet —
+and `mustChangePassword: true`. Credentials went to one 0600 file outside the
+repo and were handed over directly; nothing was logged or committed. The 171
+freelancer records (the superseded crew roster) and the 15 fixture accounts
+were removed. Dehradun was created as a city (`DDN`, Uttarakhand, GST 05) —
+AMM has staff there and it was not among the seeded six.
 
-1. **The employee list cannot produce user accounts.** `AMM EMPLOYEE DATA` is
-   a 177-row event-day crew roster — NAME / MOBILE NO / CATEGORY, every
-   category `BARTENDER`, `HOOKAH BOY` or `FOOD CATERING` — with **zero e-mail
-   addresses anywhere in the sheet**. Those 171 people are already in Podium,
-   correctly, as `Freelancer` records. Separately, the 15 "real" accounts are
-   byte-identical between dev and prod: they are the seed fixture's invented
-   people. They were **kept**, because deleting them without a replacement
-   leaves a system nobody can log into. Needed: a list of who should actually
-   have a login (name, e-mail, role, city) — likely 10–20 people, not 177.
-2. **The event calendar has no status column.** 303 distinct events (the three
+*That surfaced a blocking bug and it is fixed.* `mustChangePassword` has been
+enforced server-side since the password-lifecycle work, and `authTokensSchema`
+documents that it "forces the frontend into the change-password screen" — but
+**that screen was never built**. The flag was `false` on every account until
+now, so nobody hit it; provisioning 25 real accounts made it the normal case,
+and all 25 would have signed in to an app where every request 403s with no way
+out. Added `apps/web/app/change-password/page.tsx` (outside `AppShell`, whose
+own queries 403 behind the same guard) plus the routing in `lib/auth.tsx` and
+`AppShell.tsx`, and cleared the login form's hardcoded
+`anant.sharma@ammbrands.in` default, which now autofills an address that
+cannot sign in. Verified live end to end for a Founder and an Employee:
+forced change, mismatch rejected, dashboard reached, real data loads, and the
+temporary password returns 401 on re-use. The Employee's remaining `403` on
+`/clients` is correct RBAC, and the check asserts on the error *message* so a
+lingering password-guard 403 can never be mistaken for one.
+
+**Two things still need Anant's input:**
+
+1. **The event calendar has no status column.** 303 distinct events (the three
    month sheets are wholly contained in the master — 0 rows unique to them),
    but nothing in the file says won/quoted/confirmed/cancelled, so
    `Project` vs `Lead` cannot be inferred. Not guessed; not yet imported.
-3. **Is the prod wipe still wanted**, given §0 above?
+2. **Is the prod wipe still wanted**, given §0 above? The same 25 accounts
+   still need creating in `podium_prod`, which means deleting its 15 fixture
+   accounts — a deletion, so it waits behind the same go-ahead.
 
 *Two pre-existing product gaps surfaced while verifying, unrelated to the
 reset:* there is **no People/crew screen at all** (no `/people` route, no
-freelancers module in the API — the 171 crew are database-only), and
+freelancers module in the API), and
 **clients have no detail page** (rows are plain `<tr>`). An earlier version of
 my own verification script passed its People check against a 404 page; that
 false pass is now an explicit 404 assertion.

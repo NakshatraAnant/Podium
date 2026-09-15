@@ -5,8 +5,9 @@ analysis, the mapping proposal, the reconciliation diff for both databases,
 the backup and restore proof, and the open questions that must be answered
 before `podium_prod` is touched.
 
-**Status: `podium_dev` is done. `podium_prod` is untouched and paused, awaiting
-explicit go-ahead on the reconciliation below.**
+**Status: `podium_dev` is done, including the 25 real employee accounts from
+the KRA sheet (§4a). `podium_prod` is untouched and paused, awaiting explicit
+go-ahead on the reconciliation below.**
 
 ---
 
@@ -243,6 +244,117 @@ server-generated single-use passwords and `mustChangePassword` is a short job.
 
 ---
 
+## 4a. The KRA sheet — resolved (2026-09-15, second pass)
+
+`KRA_Sheet__2.xlsx` answers §4. One sheet, 21 staff blocks, **25 people** —
+several blocks list multiple names under one designation
+(`NIKHIL / PAWAN / MAYANK / / UJJWAL`, `BHARAT /SHOAIB`).
+
+**Sensitive-content scan: nothing excluded.** No forbidden sheet, no salary,
+bank or government-ID column, and no `@` anywhere in the file. The one cell
+that tripped a pattern — "Assist in GST and TDS compliance" — is a job
+responsibility, not a payroll field, and lives in a responsibilities column
+that is not read for identity.
+
+### Login IDs
+
+The file has no e-mail addresses, so login IDs were minted on AMM's existing
+convention: `first@ammbrands.in`, or `first.last@ammbrands.in` where a surname
+is given, de-duplicated with a numeric suffix if they ever collide (none did).
+
+| Location | People | Role assigned |
+|---|---|---|
+| Green Park Office | Zumair Bin Zaheer, Shweta | Finance |
+| Green Park Office | Rohit, Aastha, Riya | Sales |
+| Green Park Office | Love Chawla | Operations |
+| Dehradun | Shubham | Sales |
+| Dehradun | Amit Singh | Project Manager |
+| Rajasthan | **Anant Nahar** | **Founder** |
+| Rajasthan | Yashwant Soyal | Operations |
+| Rajasthan | Tejashwani Bhatra | Sales |
+| Rajasthan | Nishant Kumar | Employee |
+| Warehouse | Manish, Puran Rawat | Operations |
+| Warehouse | Nikhil, Pawan, Mayank, Ujjwal, Bharat, Shoaib, Ayush, Waseem, Rajkumari, Mukesh, Harshita | Employee |
+
+**Judgement calls, flagged because they are business decisions, not facts in
+the file:**
+
+- **Anant Nahar is the only Founder.** "Head Business-Strategist" is the most
+  senior title in the sheet, and *someone* has to be able to administer the
+  system — there is no other administrator once the fixture accounts go. If
+  that should be a different person, it is a one-line change.
+- **Role mapping.** The sheet names departments ("ACCOUNTS and PURCHASING")
+  and designations ("SENIOR BARTENDER"), not Podium roles. The mapping rules
+  are in `ROLE_RULES` in the script and are printed on every run.
+- **Dehradun was created as a city.** AMM has two staff there and it was not
+  in the seeded six (Jaipur, Udaipur, Delhi, Mumbai, Bengaluru, Goa). Added as
+  `DDN`, Uttarakhand, GST state code 05.
+- **"Green Park" and "Warehouse" were mapped to Delhi**; "Rajasthan Staff" got
+  access to both Jaipur and Udaipur.
+- **Harshita has no designation in the sheet** and defaulted to `Employee`.
+
+### Passwords and delivery
+
+Generated server-side from `crypto.randomBytes` — never derived from any
+value in the spreadsheet. 16 characters from an alphabet that omits the
+glyphs people misread aloud (`O/0`, `l/1/I`). Every account carries
+`mustChangePassword: true`, so a temporary password buys one sign-in and
+nothing else — verified: after the change, re-using it returns 401.
+
+No live mail transport exists here, so nothing was "sent". The credentials
+were written to a single **0600 file in `/home/user/podium-credentials/`,
+outside the repository**, never printed to a log and never stored in the
+database, and handed to Anant directly for distribution through a real
+channel.
+
+### What was removed
+
+- **171 freelancer records** — the superseded "AMM EMPLOYEE DATA" crew
+  roster. **Consequence worth stating plainly:** AMM's event-crew pool is now
+  empty in Podium, so there is nobody to staff an event with beyond the 11
+  warehouse employees in the KRA sheet. Reversible from the
+  `podium_dev-20260915T103300Z` backup if that was not the intent.
+- **15 user accounts** — the seed fixture's invented people, replaced by the
+  25 real ones.
+
+### The blocking bug this surfaced, and the fix
+
+`mustChangePassword` has been enforced server-side since the password
+lifecycle work — `MustChangePasswordGuard` 403s every authenticated route
+except `/auth/change-password` — and `authTokensSchema` even documents that
+the flag "forces the frontend into the change-password screen". **That screen
+was never built.** Until this pass the flag was `false` on every account, so
+nobody hit it; provisioning 25 real accounts made it the normal case, and all
+25 would have signed in to an app where every request failed with no way out.
+
+Added `apps/web/app/change-password/page.tsx`, deliberately outside `AppShell`
+(the shell's own queries 403 behind the same guard), plus the routing in
+`lib/auth.tsx` and `AppShell.tsx`. Also cleared the login form's hardcoded
+`anant.sharma@ammbrands.in` default, which now autofills an address that
+cannot sign in.
+
+**Verified live, end to end, for two deliberately different accounts:**
+
+```
+PASS  anant.nahar@ammbrands.in: temporary password forces the change screen
+PASS  anant.nahar@ammbrands.in: the screen greets the real person — Anant Nahar
+PASS  anant.nahar@ammbrands.in: mismatched confirmation is rejected
+PASS  anant.nahar@ammbrands.in: lands on the dashboard after changing
+PASS  anant.nahar@ammbrands.in: /clients loads real data after the change
+PASS  anant.nahar@ammbrands.in: the password guard no longer blocks anything
+      (/clients=200 /tasks=200 /documents=200)
+PASS  anant.nahar@ammbrands.in: the temporary password no longer works — 401
+PASS  nikhil@ammbrands.in:      ... same seven, with (/clients=403 /tasks=200 /documents=200)
+```
+
+Nikhil's `403` on `/clients` is **correct RBAC**, not the password guard —
+`Employee` holds only `documents:view`, `flows:view`, `tasks:view`,
+`tasks:edit`. The verification asserts on the error *message* precisely so
+those two never get conflated: a lingering password-guard 403 means the
+account is bricked, which is the whole failure this screen prevents.
+
+---
+
 ## 5. Reconciliation (Part 0.2) — the actual diff
 
 Method (`scripts/reconcile-source-of-truth.ts`, read-only): build a key
@@ -399,7 +511,10 @@ Before it is touched, three things need an answer:
    path and it is available today.
 2. **Event calendar: Project or Lead?** (§2c, open question 1.) 303 events are
    sitting unimported pending this.
-3. **Who should have a Podium login?** (§4.) Name, e-mail, role, city.
+3. ~~Who should have a Podium login?~~ **Answered by the KRA sheet (§4a) and
+   applied to `podium_dev`.** The same 25 accounts still need creating in
+   `podium_prod`, which is a deletion (the 15 fixture accounts) and therefore
+   waits behind the same go-ahead.
 
-Items 2 and 3 are additive and could proceed independently of any decision
-about item 1.
+Item 2 is additive and could proceed independently of any decision about
+item 1.

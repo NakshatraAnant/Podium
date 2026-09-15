@@ -2,7 +2,7 @@
   "name": "podium-v2",
   "private": true,
   "version": "0.1.0",
-  "description": "Podium v2 — production operating system for AMM Brands LLP",
+  "description": "Podium v2 \u2014 production operating system for AMM Brands LLP",
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
@@ -23,11 +23,17 @@
     "db:seed": "pnpm --filter @podium/db seed",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
-    "import:real-data": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-real-data.ts"
+    "import:real-data": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-real-data.ts",
+    "analyze:source-files": "ts-node --transpile-only -P scripts/tsconfig.json scripts/analyze-source-files.ts",
+    "reconcile:source-of-truth": "ts-node --transpile-only -P scripts/tsconfig.json scripts/reconcile-source-of-truth.ts",
+    "wipe:business-data": "ts-node --transpile-only -P scripts/tsconfig.json scripts/wipe-business-data.ts",
+    "provision:employees": "ts-node --transpile-only -P scripts/tsconfig.json scripts/provision-employees.ts"
   },
   "devDependencies": {
     "@prisma/client": "^5.22.0",
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20.16.10",
+    "bcryptjs": "^2.4.3",
     "playwright": "^1.63.0",
     "prettier": "^3.3.3",
     "ts-node": "^10.9.2",

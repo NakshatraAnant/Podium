@@ -66,10 +66,16 @@ export function AppShell({ children, crumb }: { children: ReactNode; crumb: stri
   const pathname = usePathname();
 
   useEffect(() => {
-    if (!loading && !user) router.replace("/login");
+    if (loading) return;
+    if (!user) return router.replace("/login");
+    // Server-side, MustChangePasswordGuard 403s every route but
+    // /auth/change-password while this flag is set, so any screen inside the
+    // shell would render as a wall of failed requests. Bounce to the one
+    // page that works.
+    if (user.mustChangePassword) router.replace("/change-password");
   }, [loading, user, router]);
 
-  if (loading || !user) {
+  if (loading || !user || user.mustChangePassword) {
     return (
       <div className="center-screen">
         <div className="muted">Loading Podium…</div>

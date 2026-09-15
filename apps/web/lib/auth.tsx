@@ -38,6 +38,8 @@ interface AuthContextValue {
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  /** Clears mustChangePassword locally once the server has accepted the change. */
+  markPasswordChanged: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -118,10 +120,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       lastRefreshAt.current = Date.now();
       writeRefreshClock();
       setUser(res.user);
-      router.push("/dashboard");
+      // An account provisioned with a temporary password can reach nothing
+      // but /auth/change-password — every other route 403s behind
+      // MustChangePasswordGuard — so send them there, not to a dashboard
+      // that would render as a wall of errors.
+      router.push(res.user.mustChangePassword ? "/change-password" : "/dashboard");
     },
     [router],
   );
+
+  const markPasswordChanged = useCallback(() => {
+    setUser((current) => (current ? { ...current, mustChangePassword: false } : current));
+  }, []);
 
   const logout = useCallback(() => {
     // Only the server can clear an httpOnly cookie (JS can't touch it), and
@@ -133,7 +143,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     router.push("/login");
   }, [router]);
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ user, loading, login, logout, markPasswordChanged }}>{children}</AuthContext.Provider>
+  );
 }
 
 export function useAuth(): AuthContextValue {

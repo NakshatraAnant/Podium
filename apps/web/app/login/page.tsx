@@ -6,7 +6,10 @@ import { useAuth } from "../../lib/auth";
 
 export default function LoginPage() {
   const { login } = useAuth();
-  const [email, setEmail] = useState("anant.sharma@ammbrands.in");
+  // Was prefilled with a seed-fixture account. Those were removed in the
+  // 2026-09-15 data reset, so a hardcoded default now just autofills an
+  // address that cannot sign in.
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
