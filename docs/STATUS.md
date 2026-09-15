@@ -1,6 +1,7 @@
 # Podium v2 — Build Status
 
-*Last updated: after the 2026-09-15 data reset to the real source of truth
+*Last updated: after the 2026-09-15 invoice-format, product-catalogue and
+event-calendar work (§0.-13) and the data reset that preceded it
 (§0.-12) — `podium_dev` reset and re-imported, `podium_prod` paused pending
 go-ahead. Before that: the real-data import (2026-09-11) that replaced the
 development seed fixture with AMM Brands' actual client, vendor, staffing
@@ -10,6 +11,69 @@ requests, real database queries, real test runs. This file is the
 authoritative "what's actually true" document — read it before assuming any
 phase, screen, or endpoint is production-ready. `docs/screens.md` is the
 functional spec; this file is the honest progress report against it.*
+
+## 0.-13 INVOICE FORMATS, PRODUCT CATALOGUE, EVENT CALENDAR (2026-09-15)
+
+**Full report: `docs/data-reset-2026-09-15.md` §§8-12.**
+
+*Both invoice formats are in.* `InvoiceItem` gains `scope` (FIXED |
+VARIABLE), `unit`, `detail`, `discountPct` and `sortOrder`; `Invoice` gains
+`brandId`, `docType`, `paymentTerms`, `quotationRef`, `serviceLocation` and
+`roundOff`. The renderer was rewritten to the supplied design. Rendered
+against that invoice's own line items it **matches to the rupee** — taxable
+5,26,900.00, tax 94,842, total 6,21,742, every line total identical, and the
+amount in words character-for-character the same. That last one needed real
+Indian lakh/crore grouping; three-digit-group logic gives the wrong words.
+
+*The estimate is derived, and flagged.* Both supplied PDFs render
+**pixel-identical** and both are titled TAX INVOICE, so no estimate design was
+actually provided. It varies only where it must: title, no ORIGINAL FOR
+RECIPIENT, indicative total rather than balance due, no bank block, and its
+own declaration — **that declaration is my wording**, marked in the renderer
+for AMM to confirm before it reaches a customer.
+
+*Two glyph bugs, caught by rendering and looking at it.* pdfkit's Helvetica
+is WinAnsi and carries neither `₹` nor `−`, so the rupee sign printed as a
+stray `1` and every minus as a quote mark ("Less: discount" read as
+`" 6,600.00`). Both use ASCII now; embedding a font would break all invoice
+rendering if it went missing from the API image. The tax and total columns
+also overprinted each other at their first widths.
+
+*Products: 1,893 across two brands* — Elixir Coterie 510 (`products.json`),
+The Cocktail Shop 1,383 (workbook). New `Brand` and `Product` models, a
+products API module, a paginated Products screen with brand/category filters,
+a `products` RBAC resource and a backfill script for databases that can never
+be reseeded. Idempotent on a deterministic `externalRef`, proven by running it
+twice. The TCS sheet's own flags are surfaced on the row, not hidden: 25
+shared SKUs (keyed by row index so two real products are never merged), 22
+missing prices, 72 flagged rows. Elixir's 24 variant rows are a real gap —
+Podium has no variant model, so labels and price deltas go into the
+description.
+
+*Event calendar: 299 projects.* Imported as Project rather than Lead — the
+sheet carries allocated team names and per-role headcounts, i.e. committed
+work. Only `Final Event Calender` is imported; the three month sheets enrich
+matched rows, because **not one of their rows is absent from the master** and
+importing them would have created ~93 duplicates. The year appears nowhere in
+the file and is **derived, not guessed**: the month sheets are named 2025, the
+302 dates form one Sept–Aug season in row order, and the single Excel-typed
+date is Aug 2026 → 156 events in 2025, 143 in 2026. `Project.eventDateText`
+keeps the raw string. 4 of 303 rows are skipped and named rather than given
+invented dates. Every project is assigned to Anant Nahar as PM and left in
+PLANNING — the calendar names crew, not PMs, so real PMs need setting.
+
+*Letterhead, bank details and the five contract terms* are transcribed
+verbatim from the supplied invoice into workspace configuration — never
+generated.
+
+**Tests: 211/211** (+11).
+
+**`podium_prod` is NOT done.** Go-ahead was given and a fresh restore-tested
+backup was taken, but `prisma migrate deploy` against it was refused by this
+environment's permission classifier (`[Production Deploy]`). Every remaining
+step targets the same database, so nothing was attempted after it and
+**`podium_prod` is unchanged**. The exact eight-command sequence — all of it
+already run end to end against `podium_dev` — is in §8 of the report.
 
 ## 0.-12 DATA RESET to the real source of truth (2026-09-15) — dev done, prod PAUSED
 

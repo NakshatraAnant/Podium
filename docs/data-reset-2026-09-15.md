@@ -5,9 +5,14 @@ analysis, the mapping proposal, the reconciliation diff for both databases,
 the backup and restore proof, and the open questions that must be answered
 before `podium_prod` is touched.
 
-**Status: `podium_dev` is done, including the 25 real employee accounts from
-the KRA sheet (§4a). `podium_prod` is untouched and paused, awaiting explicit
-go-ahead on the reconciliation below.**
+**Status: `podium_dev` is complete** — real clients/leads/vendors, the 25 KRA
+employee accounts, the 1,893-product catalogue, both invoice formats and the
+299 calendar events.
+
+**`podium_prod` is NOT done.** Go-ahead was given, a fresh restore-tested
+backup was taken, and the first step (`prisma migrate deploy`) was refused by
+this environment's own production-deploy guardrail. Nothing was applied to
+`podium_prod`; it still holds its original data. See §8.
 
 ---
 
@@ -518,3 +523,202 @@ Before it is touched, three things need an answer:
 
 Item 2 is additive and could proceed independently of any decision about
 item 1.
+
+
+---
+
+## 8. `podium_prod` — blocked by the environment, not by a decision
+
+Go-ahead was given on 2026-09-15. Work started and stopped at the first step.
+
+**Done:** a fresh `pg_dump` of `podium_prod`
+(`podium_prod-20260915T140703Z.dump`), restored into a scratch database and
+verified at 52,024 clients / 12,750 leads / 163 vendors / 171 freelancers /
+15 users, then dropped.
+
+**Blocked:** `prisma migrate deploy` against `podium_prod` was refused by this
+environment's permission classifier with reason `[Production Deploy]`. Every
+remaining step targets the same database and would be refused the same way,
+so nothing was attempted after it. **`podium_prod` is unchanged.**
+
+This is an environment permission, not something to engineer around. It needs
+either a Bash permission rule allowing commands against `podium_prod`, or for
+the sequence to be run by hand. The full sequence, in order, is:
+
+```bash
+export P="postgresql://podium:PASSWORD@localhost:5432/podium_prod?schema=public"
+
+# 1. schema
+DATABASE_URL="$P" npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+
+# 2. clear business records (keeps schema, RBAC, automation, flow templates,
+#    playbooks, SOPs, recipes, inventory catalogue, cities, GST codes)
+DATABASE_URL="$P" pnpm wipe:business-data --expect-db=podium_prod --dry-run
+PODIUM_ALLOW_BUSINESS_WIPE=1 DATABASE_URL="$P" pnpm wipe:business-data --expect-db=podium_prod
+
+# 3. reimport from the source workbooks
+DATABASE_URL="$P" pnpm import:real-data
+
+# 4. letterhead, bank details, contract terms, both brands
+DATABASE_URL="$P" pnpm configure:letterhead --expect-db=podium_prod
+
+# 5. the 1,893-product catalogue
+DATABASE_URL="$P" pnpm import:products
+
+# 6. the new products RBAC resource (prod can never be reseeded)
+DATABASE_URL="$P" pnpm backfill:products-permissions
+
+# 7. the 25 real employees; writes a 0600 credential file outside the repo
+PODIUM_ALLOW_EMPLOYEE_RESET=1 DATABASE_URL="$P" pnpm provision:employees --expect-db=podium_prod
+
+# 8. the 299 calendar events (needs step 7 — every project needs a PM)
+DATABASE_URL="$P" pnpm import:event-calendar
+```
+
+Every one of those steps has already been run end to end against
+`podium_dev`, in that order, with the results in §6 and §9. Each destructive
+step re-checks its own gates independently: `--expect-db` must match the
+resolved database name, the explicit env var must be set, and a fresh
+restorable `pg_dump` must exist.
+
+**Expected result on `podium_prod`**, from the dev run: 52,024 clients
+(+217 created from calendar contacts), 12,756 leads, 163 vendors, 0
+freelancers, 25 users, 1,893 products, 299 projects.
+
+---
+
+## 9. What `podium_dev` now holds
+
+| | Count | Source |
+|---|---|---|
+| clients | 52,241 | database export (52,024) + 217 created from calendar contacts |
+| leads | 12,756 | database export + Elixir funnel |
+| vendors | 163 | database export, sheet `Clients` |
+| freelancers | 0 | crew roster superseded by the KRA sheet |
+| users | 25 | KRA sheet, all `mustChangePassword` |
+| products | 1,893 | Elixir Coterie 510 + The Cocktail Shop 1,383 |
+| projects | 299 | `Final Event Calender` |
+| brands | 2 | Elixir Coterie, The Cocktail Shop |
+
+---
+
+## 10. Invoice formats
+
+Both supplied PDFs are byte-different but render **pixel-identical**, and both
+are titled `TAX INVOICE` — so only one format was actually provided. The
+estimate is derived from it (see §10b).
+
+### 10a. Tax invoice — reproduced
+
+Rendered against the supplied invoice's own line items, the output matches it
+to the rupee:
+
+| | Supplied | Rendered |
+|---|---|---|
+| Gross | 5,33,500.00 | 5,33,500.00 |
+| Less: discount | 6,600.00 | 6,600.00 |
+| Taxable value | 5,26,900.00 | 5,26,900.00 |
+| CGST @ 9% | 47,421.00 | 47,421.00 |
+| SGST @ 9% | 47,421.00 | 47,421.00 |
+| **Grand total** | **6,21,742.00** | **6,21,742.00** |
+| In words | Rupees Six Lakh Twenty One Thousand Seven Hundred Forty Two Only | *identical* |
+
+Every one of the twelve line totals matches too. The line items are split
+into the two printed sections the design uses — **FIXED SCOPE — CONTRACTED
+RATES** and **VARIABLE SCOPE — BILLED ON ACTUALS** — which is now a real
+column on `InvoiceItem` (`scope`), not something inferred at render time.
+
+`amountInWords` needed real Indian lakh/crore grouping: the usual
+three-digit-group algorithm renders 6,21,742 as "six hundred twenty-one
+thousand…", which is not how the supplied invoice reads.
+
+### 10b. Estimate — derived, and flagged
+
+Only the load-bearing differences vary: the title, no `ORIGINAL FOR
+RECIPIENT` (a tax-invoice concept), an indicative total rather than a balance
+due, no bank block (an estimate is not a demand for payment), and its own
+declaration. **That declaration is my wording, not AMM's**, and is marked
+`ESTIMATE_DECLARATION` in the renderer for confirmation before it goes to a
+customer:
+
+> This is an estimate, not a tax invoice. Quantities, scope and taxes are
+> indicative and will be confirmed against actuals on the event date. No input
+> tax credit may be claimed against this document.
+
+### 10c. Two glyph bugs, found by rendering and looking
+
+pdfkit's built-in Helvetica is WinAnsi-encoded and carries neither U+20B9 (₹)
+nor U+2212 (−). The rupee sign printed as a stray `1` and every minus as a
+quote mark — so "Less: discount" read as `" 6,600.00`. Both now use ASCII
+(`INR`, `-`). Embedding a font would restore the glyphs but puts a file on
+the critical path of issuing a tax invoice: if it is missing from the API
+image, `registerFont` throws and no invoice renders at all. Not a trade worth
+making for typography.
+
+The tax and total columns also overprinted each other at their first widths
+(26pt for a value like `2,18,300.00`).
+
+### 10d. Bank details are configuration, not constants
+
+AMM's remittance details and its five contract terms are transcribed verbatim
+from the supplied invoice into the workspace row, never generated — inventing
+contract terms for a real company is not something a renderer should do. Note
+this is AMM's **own** account for receiving payment, which belongs on an
+invoice by design; that is a different thing from the employee and
+third-party financial data `scripts/forbidden-sheet.ts` refuses to import.
+
+---
+
+## 11. Products
+
+| Brand | Rows | Source |
+|---|---|---|
+| Elixir Coterie | 510 | `products.json` — bar, hookah, chai adda, culinary, tuck shop, customization |
+| The Cocktail Shop | 1,383 | `The_Cocktail_Shop.xlsx`, sheet `Master Product List` |
+
+Nothing was excluded as sensitive from either file. Keyed on a deterministic
+`externalRef` (the Mongo `_id` for Elixir, the SKU for TCS), so a re-run
+updates in place — verified by running it twice and seeing the total stay at
+1,893.
+
+Three things the TCS sheet flags about itself are carried through to the
+screen rather than hidden: **25 rows share a SKU with another row** (those
+fall back to a row-index key so two real products are never collapsed into
+one), **22 rows have no price**, and **72 rows carry a source warning**.
+
+Elixir's 24 variant rows are a real gap: Podium has no variant model, so
+their labels and price deltas are appended to the description where a human
+can see them. That needs a decision if variant-level pricing matters.
+
+---
+
+## 12. Event calendar — 299 projects
+
+Imported as **Project**, not Lead. The file has no status column, so this is a
+judgement: the sheet is the staffing calendar, carrying allocated team names
+and per-role headcounts, which is committed work rather than pipeline. Every
+row is keyed on `externalRef`, so if that reading is wrong they can be
+identified and moved as a set.
+
+Only `Final Event Calender` is imported. The three month sheets are read for
+enrichment only — not one of their rows is absent from the master, so
+importing them as events would have created ~93 duplicates.
+
+**The year is derived, not guessed.** No date in the file carries one. Three
+independent pieces of evidence agree: the month sheets are named "October
+2025" / "November 25" / "December 25"; the 302 date cells form a single
+Sept–Aug season in row order; and the one cell Excel stored as a real date is
+21 Aug 2026. So Sept–Dec is 2025 and Jan–Aug is 2026 — giving 156 events in
+2025 and 143 in 2026. `Project.eventDateText` keeps the raw string verbatim,
+so every parsed date stays auditable.
+
+**4 of 303 rows were skipped rather than given invented data**, and each is
+named in the import output: two have no readable date (`"23RD TO 25TH"` with
+no month; one blank), two have no contact, planner or venue to name them by.
+One pattern that *is* handled: `"31ST TO 1ST NOV"` states its month once, at
+the end, and belongs to the last day — so it resolves to 31 Oct, not an
+invalid 31 Nov.
+
+**Every imported project is assigned to Anant Nahar as PM and left in
+PLANNING.** The calendar names crew, not project managers. Real PMs need
+setting in the app.
