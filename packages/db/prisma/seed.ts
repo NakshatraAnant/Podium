@@ -89,6 +89,10 @@ const RESOURCES = [
   "payments", "budgets", "expenses", "inventory", "purchase_requests",
   "approvals", "licences", "risks", "documents", "reports", "settings",
   "automation", "audit_logs", "people", "playbooks", "recipes",
+  // 2026-09-15: the sellable catalogue for Elixir Coterie and The Cocktail
+  // Shop. Finance and Sales need to read it to price an invoice; Operations
+  // maintains it alongside inventory.
+  "products",
 ];
 const ACTIONS = ["view", "create", "edit", "delete", "approve", "export"];
 
@@ -411,10 +415,10 @@ async function main() {
       // project, but playbook authoring stays with Founder/Admin.
       "playbooks:view",
     ],
-    Operations: ["tasks", "flows", "inventory", "vendors", "purchase_requests", "people", "recipes"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
+    Operations: ["tasks", "flows", "inventory", "vendors", "purchase_requests", "people", "recipes", "products"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
     Finance: ["invoices", "payments", "budgets", "expenses", "reports"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`))
-      .concat(["approvals:approve", "approvals:view", "projects:view"]),
-    Sales: ["leads", "clients"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)),
+      .concat(["approvals:approve", "approvals:view", "projects:view", "products:view"]),
+    Sales: ["leads", "clients"].flatMap((r) => ACTIONS.map((a) => `${r}:${a}`)).concat(["products:view"]),
     // Creative/Employee get flows:view (not flows:edit) so the PermissionsGuard
     // lets them into flow-step endpoints at all; FlowsService then enforces the
     // real, row-level check — only the step's assigned owner (or a flows:edit

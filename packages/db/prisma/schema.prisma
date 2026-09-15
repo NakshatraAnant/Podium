@@ -189,6 +189,30 @@ enum InvoiceStatus {
   CANCELLED
 }
 
+// AMM issues two documents off the same data. A TAX_INVOICE is the GST
+// document; an ESTIMATE is the pre-event quotation, which carries the same
+// figures but is explicitly not a demand for tax.
+enum InvoiceDocType {
+  TAX_INVOICE
+  ESTIMATE
+}
+
+// The supplied invoice splits line items into two headed sections. FIXED is
+// contracted scope at agreed rates; VARIABLE is billed on actuals after the
+// event. The distinction is printed on the document, so it belongs on the
+// row rather than being inferred at render time.
+enum InvoiceScope {
+  FIXED
+  VARIABLE
+}
+
+// How a catalogue product is priced — mirrors the Elixir export.
+enum ProductPricingMode {
+  PER_QUANTITY
+  PER_GUEST
+  FIXED
+}
+
 enum PaymentMethod {
   CASH
   BANK_TRANSFER
@@ -309,6 +333,25 @@ model Workspace {
   id        String    @id @default(uuid()) @db.Uuid
   name      String
   gstin     String?
+  /// Registered address, printed under the letterhead on every document.
+  address   String?
+  website   String?
+  /// Remittance details printed on invoices. These are AMM's OWN account for
+  /// receiving payment — they belong on the document by design, and are
+  /// deliberately configuration rather than constants in the renderer so
+  /// changing bank does not mean changing code. Note this is a different
+  /// thing entirely from the employee/third-party financial data that
+  /// scripts/forbidden-sheet.ts refuses to import.
+  bankName      String? @map("bank_name")
+  bankAccountName String? @map("bank_account_name")
+  bankAccountNo String? @map("bank_account_no")
+  bankIfsc      String? @map("bank_ifsc")
+  /// Numbered terms, in print order. AMM's own wording, supplied with the
+  /// invoice design — never generated, because inventing contract terms for
+  /// a real company is not something a renderer should do.
+  invoiceTerms  String[] @map("invoice_terms")
+  /// The declaration line above the authorised signature.
+  invoiceDeclaration String? @map("invoice_declaration")
   /// Purchase requests at or above this value need an approval before a PO can
   /// be raised. Configurable per workspace rather than hardcoded.
   procurementApprovalThreshold Decimal @default(50000) @map("procurement_approval_threshold") @db.Decimal(14, 2)
@@ -317,6 +360,8 @@ model Workspace {
   deletedAt DateTime? @map("deleted_at")
 
   cities            City[]
+  brands            Brand[]
+  products          Product[]
   users             User[]
   roles             Role[]
   permissions       Permission[]
@@ -790,6 +835,15 @@ model Project {
   type        String
   cityId      String        @map("city_id") @db.Uuid
   eventDate   DateTime      @map("event_date")
+  /// The event date exactly as AMM's calendar records it — "26-27th Sept",
+  /// "29th Nov - Sangeet 2nd Dec - Haldi". eventDate above is the single
+  /// timestamp everything schedules against (health, SLAs, dashboards), and
+  /// for a multi-day booking it can only be the first day. Keeping the raw
+  /// string means the full booking is never lost to that reduction, and any
+  /// date parsed on import stays auditable against its source.
+  eventDateText String?     @map("event_date_text")
+  /// Where the row came from, for rows imported from the event calendar.
+  externalRef String?       @map("external_ref")
   pmId        String        @map("pm_id") @db.Uuid
   status      ProjectStatus @default(PLANNING)
   health      ProjectHealth @default(GREEN) // computed, recalculated server-side (blueprint §19) — never client-set
@@ -827,6 +881,7 @@ model Project {
   eventDayIncidents EventDayIncident[]
   emails          Email[]
 
+  @@unique([workspaceId, externalRef])
   @@index([workspaceId, cityId, status])
   @@map("projects")
 }
@@ -1116,6 +1171,75 @@ model InventoryReservation {
 // MENU COSTING
 // =========================================================================
 
+// A trading brand under AMM Brands LLP. AMM invoices as one legal entity
+// (one GSTIN, one bank account) but sells under distinct brands — Elixir
+// Coterie for event bar and catering, The Cocktail Shop for retail product —
+// and an invoice is issued under one of them. The GSTIN lives on Workspace,
+// not here, precisely because it is the LLP's and is shared.
+model Brand {
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @map("workspace_id") @db.Uuid
+  name        String
+  code        String // ELIXIR, TCS
+  /// Printed under the letterhead on that brand's documents.
+  tagline     String?
+  website     String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  products  Product[]
+  invoices  Invoice[]
+
+  @@unique([workspaceId, code])
+  @@map("brands")
+}
+
+// The sellable catalogue, for both brands. Deliberately separate from
+// InventoryItem: that tracks physical stock moving in and out of a location,
+// whereas this is what may appear as a line on an invoice — including
+// services ("Bartenders — premium cocktail service") that hold no stock.
+model Product {
+  id          String             @id @default(uuid()) @db.Uuid
+  workspaceId String             @map("workspace_id") @db.Uuid
+  brandId     String             @map("brand_id") @db.Uuid
+  /// Stable key from the source export, so re-importing updates rather than duplicating.
+  externalRef String             @map("external_ref")
+  /// The brand's own code where it has one (TCS-D-001). Elixir has none.
+  sku         String?
+  name        String
+  /// Elixir's serviceId (bar, hookah, chai_adda…) or TCS's product type.
+  serviceLine String?            @map("service_line")
+  category    String?
+  shortDesc   String?            @map("short_desc")
+  longDesc    String?            @map("long_desc")
+  unit        String?
+  /// Excluding GST, always — the TCS sheet carries both and only this is stored.
+  price       Decimal            @default(0) @db.Decimal(14, 2)
+  pricingMode ProductPricingMode @default(PER_QUANTITY) @map("pricing_mode")
+  /// Fractional rate as filed, e.g. 0.18 for 18%.
+  gstRate     Decimal?           @map("gst_rate") @db.Decimal(5, 4)
+  hsnSac      String?            @map("hsn_sac")
+  isActive    Boolean            @default(true) @map("is_active")
+  /// TCS only; the Elixir catalogue is service-led and holds no stock.
+  stockQty    Decimal?           @map("stock_qty") @db.Decimal(14, 2)
+  vendorName  String?            @map("vendor_name")
+  /// Notes the source flagged on the row (duplicate SKU, missing price).
+  sourceFlag  String?            @map("source_flag")
+  sourceFile  String?            @map("source_file")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+  deletedAt   DateTime?          @map("deleted_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  brand     Brand     @relation(fields: [brandId], references: [id])
+
+  @@unique([workspaceId, externalRef])
+  @@index([workspaceId, brandId, category])
+  @@map("products")
+}
+
 model Recipe {
   id          String    @id @default(uuid()) @db.Uuid
   workspaceId String    @map("workspace_id") @db.Uuid
@@ -1320,6 +1444,11 @@ model Invoice {
   clientId       String        @map("client_id") @db.Uuid
   projectId      String        @map("project_id") @db.Uuid
   cityId         String        @map("city_id") @db.Uuid
+  /// Which trading brand the document is issued under. Nullable because every
+  /// invoice raised before brands existed has no answer, and assigning one
+  /// retrospectively would be inventing a fact about a tax document.
+  brandId        String?        @map("brand_id") @db.Uuid
+  docType        InvoiceDocType @default(TAX_INVOICE) @map("doc_type")
   issueDate      DateTime?     @map("issue_date")
   dueDate        DateTime      @map("due_date")
   status         InvoiceStatus @default(DRAFT)
@@ -1329,6 +1458,15 @@ model Invoice {
   sgst           Decimal       @default(0) @db.Decimal(14, 2)
   igst           Decimal       @default(0) @db.Decimal(14, 2)
   total          Decimal       @default(0) @db.Decimal(14, 2)
+  /// Printed on the document. Free text because AMM writes them per deal
+  /// ("50% advance, balance on event date").
+  paymentTerms    String?      @map("payment_terms")
+  /// "Quotation ref. 43 dated 17 May 2026" on the supplied layout.
+  quotationRef    String?      @map("quotation_ref")
+  /// Where the work happens, which is not always the billing address.
+  serviceLocation String?      @map("service_location")
+  /// Rounding applied to reach the printed grand total, signed.
+  roundOff       Decimal       @default(0) @map("round_off") @db.Decimal(6, 2)
   idempotencyKey String?       @unique @map("idempotency_key")
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
@@ -1336,6 +1474,7 @@ model Invoice {
   deletedAt      DateTime?     @map("deleted_at")
 
   workspace   Workspace     @relation(fields: [workspaceId], references: [id])
+  brand       Brand?        @relation(fields: [brandId], references: [id])
   client      Client        @relation(fields: [clientId], references: [id])
   project     Project       @relation(fields: [projectId], references: [id])
   city        City          @relation(fields: [cityId], references: [id])
@@ -1352,12 +1491,24 @@ model InvoiceItem {
   id          String  @id @default(uuid()) @db.Uuid
   invoiceId   String  @map("invoice_id") @db.Uuid
   description String
+  /// The smaller italic line under the description on the printed invoice.
+  detail      String?
   qty         Decimal @default(1) @db.Decimal(10, 2)
+  /// The noun after the quantity — "8 person", "2 counter", "1 job".
+  unit        String?
   rate        Decimal @db.Decimal(14, 2)
-  hsnSac      String? @map("hsn_sac")
+  /// Percentage off the line, e.g. 5 for the 5% on bartenders. Stored as a
+  /// rate, not an amount: the document prints the rate, and holding both
+  /// lets them disagree the moment someone edits one.
+  discountPct Decimal      @default(0) @map("discount_pct") @db.Decimal(5, 2)
+  hsnSac      String?      @map("hsn_sac")
+  scope       InvoiceScope @default(FIXED)
+  /// Print order within a scope section; the document numbers lines 01, 02…
+  sortOrder   Int          @default(0) @map("sort_order")
 
   invoice Invoice @relation(fields: [invoiceId], references: [id])
 
+  @@index([invoiceId, scope, sortOrder])
   @@map("invoice_items")
 }
 

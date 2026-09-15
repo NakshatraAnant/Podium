@@ -12,6 +12,19 @@ type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction"
 
 const GST_RATE = 0.18;
 
+/**
+ * One line's taxable value: quantity x rate, less its own discount.
+ *
+ * Shared by create() and issue() deliberately. The draft total and the issued
+ * total have to be computed the same way, or a discount silently changes the
+ * moment an invoice is issued — and the issued figure is the one that is
+ * filed.
+ */
+function lineTaxable(qty: number, rate: number, discountPct: number): number {
+  const gross = qty * rate;
+  return gross - gross * (discountPct / 100);
+}
+
 function financialYearFor(date: Date): string {
   const y = date.getUTCFullYear();
   const startYear = date.getUTCMonth() >= 3 ? y : y - 1; // Indian FY: Apr-Mar
@@ -53,7 +66,16 @@ export class InvoicesService {
   async get(user: RequestUser, id: string) {
     const invoice = await this.prisma.client.invoice.findFirst({
       where: { id, workspaceId: user.workspaceId, deletedAt: null },
-      include: { items: true, payments: true, creditNotes: true, debitNotes: true, client: true, project: true, city: true },
+      include: {
+        items: { orderBy: [{ scope: "asc" }, { sortOrder: "asc" }] },
+        payments: true,
+        creditNotes: true,
+        debitNotes: true,
+        client: true,
+        project: true,
+        city: true,
+        brand: true,
+      },
     });
     if (!invoice) throw new NotFoundException("Invoice not found.");
     this.cityScope.assertCanAccessCity(user, invoice.cityId);
@@ -68,7 +90,7 @@ export class InvoicesService {
     }
     this.cityScope.assertCanAccessCity(user, input.cityId);
     const client = await this.prisma.client.client.findUniqueOrThrow({ where: { id: input.clientId } });
-    const taxable = input.items.reduce((s, i) => s + i.qty * i.rate, 0);
+    const taxable = input.items.reduce((s, i) => s + lineTaxable(i.qty, i.rate, i.discountPct), 0);
 
     return this.prisma.client.invoice.create({
       data: {
@@ -77,12 +99,33 @@ export class InvoicesService {
         clientId: input.clientId,
         projectId: input.projectId,
         cityId: input.cityId,
+        brandId: input.brandId,
+        docType: input.docType,
         dueDate: input.dueDate,
+        paymentTerms: input.paymentTerms,
+        quotationRef: input.quotationRef,
+        serviceLocation: input.serviceLocation,
         status: "DRAFT",
         placeOfSupply: client.gstStateCode ?? "",
         taxableAmount: taxable,
         idempotencyKey,
-        items: { create: input.items.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate, hsnSac: i.hsnSac })) },
+        items: {
+          // sortOrder is the caller's array order: the printed document
+          // numbers lines 01, 02… within each scope, and an invoice whose
+          // lines reshuffle between renders is not a document anyone can
+          // reconcile against.
+          create: input.items.map((i, index) => ({
+            description: i.description,
+            detail: i.detail,
+            qty: i.qty,
+            unit: i.unit,
+            rate: i.rate,
+            discountPct: i.discountPct,
+            hsnSac: i.hsnSac,
+            scope: i.scope,
+            sortOrder: index,
+          })),
+        },
         createdById: user.id,
       },
       include: { items: true },
@@ -107,12 +150,24 @@ export class InvoicesService {
       }
 
       const invoiceNo = await this.mintInvoiceNumber(tx, user.workspaceId, invoice.cityId, invoice.city.code, new Date());
-      const taxable = invoice.items.reduce((s, i) => s + i.qty.toNumber() * i.rate.toNumber(), 0);
+      const taxable = invoice.items.reduce(
+        (s, i) => s + lineTaxable(i.qty.toNumber(), i.rate.toNumber(), i.discountPct.toNumber()),
+        0,
+      );
       const intra = invoice.city.gstStateCode === invoice.client.gstStateCode;
       const tax = Math.round(taxable * GST_RATE);
       const cgst = intra ? tax / 2 : 0;
       const sgst = intra ? tax / 2 : 0;
       const igst = intra ? 0 : tax;
+
+      // AMM's invoices present a whole-rupee grand total, with the rounding
+      // shown as its own line. Storing the adjustment rather than silently
+      // folding it into the total is what lets the printed SUMMARY column
+      // add up exactly — and what keeps the GST figures equal to what was
+      // actually computed.
+      const beforeRounding = taxable + tax;
+      const total = Math.round(beforeRounding);
+      const roundOff = Number((total - beforeRounding).toFixed(2));
 
       return tx.invoice.update({
         where: { id: invoice.id },
@@ -123,7 +178,8 @@ export class InvoicesService {
           placeOfSupply: invoice.client.gstStateCode,
           taxableAmount: taxable,
           cgst, sgst, igst,
-          total: taxable + tax,
+          roundOff,
+          total,
         },
         include: { items: true },
       });
@@ -222,16 +278,33 @@ export class InvoicesService {
 
     const data: InvoicePdfData = {
       invoiceNo: invoice.invoiceNo,
+      docType: invoice.docType,
       issueDate: invoice.issueDate,
       dueDate: invoice.dueDate,
       status: invoice.status,
       placeOfSupply: invoice.placeOfSupply,
+      paymentTerms: invoice.paymentTerms,
+      quotationRef: invoice.quotationRef,
+      serviceLocation: invoice.serviceLocation,
       taxableAmount: invoice.taxableAmount.toNumber(),
       cgst: invoice.cgst.toNumber(),
       sgst: invoice.sgst.toNumber(),
       igst: invoice.igst.toNumber(),
+      roundOff: invoice.roundOff.toNumber(),
       total: invoice.total.toNumber(),
-      workspace: { name: workspace.name, gstin: workspace.gstin },
+      workspace: {
+        name: workspace.name,
+        gstin: workspace.gstin,
+        address: workspace.address,
+        website: workspace.website,
+        bankName: workspace.bankName,
+        bankAccountName: workspace.bankAccountName,
+        bankAccountNo: workspace.bankAccountNo,
+        bankIfsc: workspace.bankIfsc,
+        invoiceTerms: workspace.invoiceTerms,
+        invoiceDeclaration: workspace.invoiceDeclaration,
+      },
+      brand: invoice.brand ? { name: invoice.brand.name, tagline: invoice.brand.tagline, website: invoice.brand.website } : null,
       city: { name: invoice.city.name, state: invoice.city.state, gstStateCode: invoice.city.gstStateCode },
       client: {
         name: invoice.client.name,
@@ -239,12 +312,16 @@ export class InvoicesService {
         gstin: invoice.client.gstin,
         gstStateCode: invoice.client.gstStateCode,
       },
-      project: { name: invoice.project.name },
+      project: { name: invoice.project.name, eventDate: invoice.project.eventDate },
       items: invoice.items.map((i) => ({
         description: i.description,
+        detail: i.detail,
         qty: i.qty.toNumber(),
+        unit: i.unit,
         rate: i.rate.toNumber(),
+        discountPct: i.discountPct.toNumber(),
         hsnSac: i.hsnSac,
+        scope: i.scope,
       })),
       payments: invoice.payments.map((p) => ({ amount: p.amount.toNumber(), receivedAt: p.receivedAt, method: p.method })),
       creditNotes: invoice.creditNotes.map((n) => ({ amount: n.amount.toNumber(), reason: n.reason })),

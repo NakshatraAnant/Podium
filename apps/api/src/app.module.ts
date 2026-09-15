@@ -27,6 +27,7 @@ import { AutomationModule } from "./automation/automation.module";
 import { DocumentsModule } from "./documents/documents.module";
 import { EventDayModule } from "./eventday/eventday.module";
 import { NotificationsModule } from "./notifications/notifications.module";
+import { ProductsModule } from "./products/products.module";
 import { PlaybooksModule } from "./playbooks/playbooks.module";
 import { ProcurementModule } from "./procurement/procurement.module";
 import { RecipesModule } from "./recipes/recipes.module";
@@ -38,6 +39,7 @@ import { VendorsModule } from "./vendors/vendors.module";
 
 @Module({
   imports: [
+    ProductsModule,
     /**
      * The env file is resolved from this file's own location, never from
      * `process.cwd()`. `pnpm --filter @podium/api dev` (and `pnpm dev:api`,

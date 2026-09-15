@@ -27,7 +27,11 @@
     "analyze:source-files": "ts-node --transpile-only -P scripts/tsconfig.json scripts/analyze-source-files.ts",
     "reconcile:source-of-truth": "ts-node --transpile-only -P scripts/tsconfig.json scripts/reconcile-source-of-truth.ts",
     "wipe:business-data": "ts-node --transpile-only -P scripts/tsconfig.json scripts/wipe-business-data.ts",
-    "provision:employees": "ts-node --transpile-only -P scripts/tsconfig.json scripts/provision-employees.ts"
+    "provision:employees": "ts-node --transpile-only -P scripts/tsconfig.json scripts/provision-employees.ts",
+    "import:products": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-products.ts",
+    "configure:letterhead": "ts-node --transpile-only -P scripts/tsconfig.json scripts/configure-workspace-letterhead.ts",
+    "import:event-calendar": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-event-calendar.ts",
+    "backfill:products-permissions": "ts-node --transpile-only -P scripts/tsconfig.json scripts/backfill-products-permissions.ts"
   },
   "devDependencies": {
     "@prisma/client": "^5.22.0",

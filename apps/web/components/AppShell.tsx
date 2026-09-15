@@ -39,6 +39,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ href: string; icon: stri
       { href: "/procurement", icon: "⛁", label: "Procurement" },
       { href: "/vendors", icon: "⚑", label: "Vendors" },
       { href: "/menu", icon: "☕", label: "Menu Costing" },
+      { href: "/products", icon: "◈", label: "Products" },
     ],
   },
   {
