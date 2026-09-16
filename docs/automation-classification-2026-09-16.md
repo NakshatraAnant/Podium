@@ -24,25 +24,59 @@ history, and `is_enabled`.
 
 ## The table
 
-| Rule | Trigger | Enabled | Handler | Raised from | Runs | Classification |
-| --- | --- | --- | --- | --- | --- | --- |
-| Chat @mention → notification | `chat.mentioned` | yes | registered | `apps/api/src/chat/chat.service.ts:67` | 0 | **CONFIGURED_BUT_INACTIVE** |
-| Client Approval Nudge | `approval.pending_hours:48` | no | none | **nowhere** | 0 | **DEMO_FIXTURE** |
-| Deal Won → Project Auto-Creation | `lead.stage_changed:Won` | yes | registered | `apps/api/src/crm/leads.service.ts:89 (templated), :304` | 0 | **CONFIGURED_BUT_INACTIVE** |
-| Event Day Countdown Triggers | `project.event_date_minus_days:30,7,1` | yes | none | **nowhere** | 0 | **DEMO_FIXTURE** |
-| Invoice overdue → Gmail reminder | `invoice.overdue_days:7` | yes | none | **nowhere** | 0 | **DEMO_FIXTURE** |
-| Licence not approved T-7 | `licence.due_date_minus_days:7` | yes | registered | `apps/api/src/automation/automation.scheduler.ts:62` | 0 | **CONFIGURED_BUT_INACTIVE** |
-| Low stock → purchase request | `inventory_balance.available_lt_reorder_level` | yes | registered | `apps/api/src/automation/automation.scheduler.ts:85` | 0 | **CONFIGURED_BUT_INACTIVE** |
-| Meet ends → action items to tasks | `meeting.ended` | no | none | **nowhere** | 0 | **DEMO_FIXTURE** |
-| Step done → hand off to next person | `flow_step.completed` | yes | none | **nowhere** | 0 | **DEMO_FIXTURE** |
-| Task Overdue Escalation | `task.overdue` | yes | none | **nowhere** | 0 | **DEMO_FIXTURE** |
-| Vendor Payment Reminder | `purchase_order.due_in_days:3` | yes | none | **nowhere** | 0 | **DEMO_FIXTURE** |
+Three dimensions, not one. **Added 2026-09-16 (Phase 0 §D)**: the first
+version of this page used a single label, and that label was actively
+misleading. "Step done → hand off to next person" came out DEMO_FIXTURE —
+true of the rule ROW, and completely false about the business capability,
+which is fully built in `FlowsService.completeStep` and runs on every
+completion. One word cannot carry both, and the version that tried made
+Podium claim it could not do something it does.
 
-4 CONFIGURED_BUT_INACTIVE, 7 DEMO_FIXTURE. **Zero WORKING, zero BROKEN, zero
-DEAD.** Run history is identical in `podium_prod` and `podium_dev`: no
-automation has ever executed in either.
+* **Configuration** — what the rule row is. `CONFIGURED`, `DEMO_FIXTURE`,
+  `DISABLED`, `INVALID`. Derived.
+* **Capability** — whether the behaviour exists at all, wherever it lives.
+  `WORKING_NATIVELY`, `WORKING_VIA_AUTOMATION`, `PARTIAL`, `MISSING`.
+  Declared, with the code that backs each claim, because "is this built
+  somewhere else" is a judgement about code and cannot be grepped.
+* **Runtime** — whether it can execute today. `VERIFIED_WORKING`,
+  `EXECUTABLE`, `WORKER_UNAVAILABLE`, `BLOCKED`, `FAILING`. Derived.
 
----
+| Rule | Trigger | Configuration | Capability | Runtime |
+| --- | --- | --- | --- | --- |
+| Chat @mention → notification | `chat.mentioned` | CONFIGURED | **WORKING_VIA_AUTOMATION** | EXECUTABLE |
+| Client Approval Nudge | `approval.pending_hours:48` | DEMO_FIXTURE | **MISSING** | BLOCKED |
+| Deal Won → Project Auto-Creation | `lead.stage_changed:Won` | CONFIGURED | **WORKING_VIA_AUTOMATION** | EXECUTABLE |
+| Event Day Countdown Triggers | `project.event_date_minus_days:30,7,1` | DEMO_FIXTURE | **MISSING** | BLOCKED |
+| Invoice overdue → Gmail reminder | `invoice.overdue_days:7` | DEMO_FIXTURE | **PARTIAL** | BLOCKED |
+| Licence not approved T-7 | `licence.due_date_minus_days:7` | CONFIGURED | **WORKING_VIA_AUTOMATION** | WORKER_UNAVAILABLE |
+| Low stock → purchase request | `inventory_balance.available_lt_reorder_level` | CONFIGURED | **WORKING_VIA_AUTOMATION** | WORKER_UNAVAILABLE |
+| Meet ends → action items to tasks | `meeting.ended` | DEMO_FIXTURE | **MISSING** | BLOCKED |
+| Step done → hand off to next person | `flow_step.completed` | DEMO_FIXTURE | **WORKING_NATIVELY** | EXECUTABLE |
+| Task Overdue Escalation | `task.overdue` | DEMO_FIXTURE | **MISSING** | BLOCKED |
+| Vendor Payment Reminder | `purchase_order.due_in_days:3` | DEMO_FIXTURE | **MISSING** | BLOCKED |
+
+| Rule | Handler | Raised from | Runs | Capability backed by |
+| --- | --- | --- | --- | --- |
+| Chat @mention → notification | registered | `apps/api/src/chat/chat.service.ts:67` | 0 | ChatMentionHandler, raised inline by ChatService |
+| Client Approval Nudge | none | **nowhere** | 0 | no implementation anywhere in the codebase |
+| Deal Won → Project Auto-Creation | registered | `apps/api/src/crm/leads.service.ts:89 (templated), apps/api/src/crm/leads.service.ts:304` | 0 | DealWonHandler — creates client, project, channel, notification, audit atomically; returns BLOCKED rather than inventing missing fields |
+| Event Day Countdown Triggers | none | **nowhere** | 0 | no implementation anywhere in the codebase |
+| Invoice overdue → Gmail reminder | none | **nowhere** | 0 | InvoicesService.sweepOverdue does the status transition and the PM notification; the Gmail draft and the city-P&L flag do not exist |
+| Licence not approved T-7 | registered | `apps/api/src/automation/automation.scheduler.ts:62 (templated)` | 0 | LicenceEscalationHandler, driven by AutomationScheduler.sweepLicences |
+| Low stock → purchase request | registered | `apps/api/src/automation/automation.scheduler.ts:85` | 0 | LowStockHandler, driven by AutomationScheduler.sweepLowStock |
+| Meet ends → action items to tasks | none | **nowhere** | 0 | no implementation anywhere in the codebase |
+| Step done → hand off to next person | none | **nowhere** | 0 | FlowsService.completeStep — unlocks dependents, notifies each new owner, posts the bot message, in one transaction |
+| Task Overdue Escalation | none | **nowhere** | 0 | nothing notifies or escalates; ProjectsService.recomputeHealth only COUNTS overdue tasks to colour the project |
+| Vendor Payment Reminder | none | **nowhere** | 0 | no implementation anywhere in the codebase |
+
+_Derived by `scripts/classify-automation-rules.ts` against `podium_prod` on 2026-09-16._
+
+**Configuration**: 5 CONFIGURED, 6 DEMO_FIXTURE.
+**Capability**: 4 WORKING_VIA_AUTOMATION, 1 WORKING_NATIVELY, 1 PARTIAL, 5 MISSING.
+**Runtime**: 3 EXECUTABLE, 2 WORKER_UNAVAILABLE, 6 BLOCKED, 0 VERIFIED_WORKING, 0 FAILING.
+
+Run history is identical in `podium_prod` and `podium_dev`: no automation has
+ever executed in either, which is why nothing is VERIFIED_WORKING.
 
 ## The finding the table does not show
 
@@ -63,7 +97,19 @@ share that process. Their run count of 0 is a consequence of that, not of
 anything wrong with the rules. **This is a deployment gap, not a rule defect,
 and it outweighs every individual rule finding on this page.**
 
-Recorded as **DQ-008** in the Phase 0 Evidence Register.
+**Recorded as OPS-001** — "Background worker process is not started by any
+known deployment or runtime configuration" — in
+`docs/phase-0-evidence-register.md`.
+
+This finding was originally filed as **DQ-008**, a Data Quality entry. That
+was the wrong namespace: nothing about the data is wrong, a process is not
+running. The register keeps DQ-008 as a superseded entry pointing at OPS-001
+rather than deleting it, so the audit trail of how the finding was first
+classified stays intact.
+
+The full inventory of what that process owns, and the order activation has to
+follow, is in `docs/worker-responsibility-inventory-2026-09-16.md`. **It has
+not been started.**
 
 ---
 
@@ -87,7 +133,7 @@ all three are real:
   BLOCKED run, the list of fields a human must supply. Toggling a rule is
   audited as `automation_rule.toggled`.
 
-### CONFIGURED_BUT_INACTIVE — wired, enabled, never yet triggered
+### Configuration CONFIGURED, capability present, runtime not yet exercised
 
 **Deal Won → Project Auto-Creation** (`lead.stage_changed:Won`)
 Handler `DealWonHandler` is registered and tested: it creates the client's
@@ -103,8 +149,8 @@ city, value or PM. Two things keep it from ever running on real data:
    screen offers the manual conversion flow instead.
 
 So in practice this rule's trigger is raised by nothing a user can reach.
-Separately, since BUG-007, the handler now also checks for a live conversion
-and returns `alreadyConverted` rather than building a second project — so even
+Separately, since BUG-007 the handler also checks for a live conversion and
+returns `alreadyConverted` rather than building a second project — so even
 if `markWon` were called after a manual conversion, it would correctly do
 nothing.
 **Recommendation: leave enabled.** It is correct and tested; it is waiting on
@@ -129,14 +175,18 @@ has nothing to detect today for a second reason: the only inventory balances
 in the database are quarantined fixtures (PHASE 0 §1), so there is no verified
 opening stock for a reorder level to be below.
 
-### DEMO_FIXTURE — a row describing an intention, with no mechanism
+### Configuration DEMO_FIXTURE — a row with no mechanism of its own
 
-Seven rules have no registered handler **and** no code path that raises their
+Six rules have no registered handler **and** no code path that raises their
 trigger. They are configuration rows carried over from the prototype's
-automation screen. Three deserve individual notes, because "no mechanism"
-does not mean "the behaviour does not exist":
+automation screen.
+
+"No mechanism" is a statement about the ROW, not about Podium. Three of the
+six have a capability that exists regardless — which is exactly why the
+capability dimension was added:
 
 **Step done → hand off to next person** (`flow_step.completed`)
+*Configuration DEMO_FIXTURE · Capability WORKING_NATIVELY · Runtime EXECUTABLE.*
 The described behaviour is **fully implemented** — just not through the
 automation engine. `FlowsService.completeStep` unlocks steps whose
 dependencies are now all met, notifies each new owner, and sends the Podium
@@ -145,11 +195,13 @@ would change nothing and would tell a reader on the automation screen that a
 working feature is off.
 
 **Invoice overdue → Gmail reminder** (`invoice.overdue_days:7`)
+*Configuration DEMO_FIXTURE · Capability PARTIAL · Runtime BLOCKED.*
 Partly implemented elsewhere: `InvoicesService.sweepOverdue` transitions
 invoices to OVERDUE and notifies, from the worker's daily job. The Gmail draft
 and the city-P&L flag named in this rule's actions do not exist.
 
 **Task Overdue Escalation** (`task.overdue`)
+*Configuration DEMO_FIXTURE · Capability MISSING · Runtime BLOCKED.*
 Nothing implements it. The nearest thing is `ProjectsService`'s health
 recompute, which *counts* overdue tasks to colour a project amber or red; it
 does not notify the owner, the PM or the founder, and it does not raise a
@@ -182,10 +234,10 @@ field — also Phase 1.
 
 | Change | Effect |
 | --- | --- |
-| Start the `workers/` process | Licence T-7 and Low stock become exercisable; expect WORKING or BROKEN within one tick |
-| Anyone @-mentions a colleague in Podium | Chat mention → WORKING |
+| Start the `workers/` process (OPS-001, **not yet done** — see the inventory) | Licence T-7 and Low stock move from runtime WORKER_UNAVAILABLE to EXECUTABLE, then VERIFIED_WORKING or FAILING within one tick |
+| Anyone @-mentions a colleague in Podium | Chat mention runtime → VERIFIED_WORKING |
 | A UI path calls `POST /leads/:id/mark-won` | Deal Won becomes reachable |
-| Implementing a handler + emit site for any DEMO_FIXTURE rule | That rule leaves DEMO_FIXTURE |
+| Implementing a handler + emit site for any DEMO_FIXTURE rule | Its configuration becomes CONFIGURED and its capability MISSING → WORKING_VIA_AUTOMATION |
 
 Re-run `pnpm classify:automation` after any of these. The classification is
 derived, so it will move on its own.
