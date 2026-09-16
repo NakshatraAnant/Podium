@@ -43,6 +43,7 @@ describe("Lead conversion is idempotent (BUG-007)", () => {
 
   const post = (p: string, t: string, b?: unknown) =>
     request(app.getHttpServer()).post(p).set("Authorization", `Bearer ${t}`).send(b ?? {});
+  const del = (p: string, t: string) => request(app.getHttpServer()).delete(p).set("Authorization", `Bearer ${t}`);
 
   async function createLead(name: string) {
     const res = await post("/api/leads", founder, { name, value: 500_000, cityId, ownerId: pmId });
@@ -216,6 +217,158 @@ describe("Lead conversion is idempotent (BUG-007)", () => {
     const all = await conversionsOf(leadId);
     expect(all).toHaveLength(2);
     expect(all.filter((p) => p.deletedAt === null)).toHaveLength(1);
+  });
+
+  /**
+   * WHAT THE INVARIANT IS NOT.
+   *
+   * "One lead -> one project" would be a bug, not a guarantee: AMM's whole
+   * business is a client booking them again. The limit is on the CONVERSION —
+   * at most one live initial project per conversion — and it must not reach
+   * the client that conversion produced.
+   */
+  describe("the limit is on the conversion, never on the client", () => {
+    it("a converted client can hold as many further projects as it likes", async () => {
+      const leadId = await createLead(`e2e BUG-007 — repeat customer ${RUN}`);
+      const converted = await post(`/api/leads/${leadId}/convert`, founder, conversionBody("repeat-customer"));
+      expect(converted.status).toBe(201);
+      const clientId = converted.body.client.id as string;
+
+      // Three more events for the same client, the ordinary way — a wedding
+      // season, not a duplicate.
+      for (const name of ["Sangeet", "Reception", "Anniversary"]) {
+        const res = await post("/api/projects", founder, {
+          name: `e2e BUG-007 ${name} ${RUN}`,
+          clientId,
+          type: "Wedding",
+          cityId,
+          eventDate: "2027-11-20",
+          pmId,
+        });
+        expect([name, res.status]).toEqual([name, 201]);
+      }
+
+      expect(await prisma.project.count({ where: { clientId, deletedAt: null } })).toBe(4);
+      // ...and exactly one of the four is the conversion.
+      expect(await prisma.project.count({ where: { clientId, convertedFromLeadId: { not: null } } })).toBe(1);
+    });
+
+    it("a second conversion of a DIFFERENT lead onto the same client is allowed", async () => {
+      const firstLead = await createLead(`e2e BUG-007 — client reuse A ${RUN}`);
+      const first = await post(`/api/leads/${firstLead}/convert`, founder, conversionBody("reuse-a"));
+      expect(first.status).toBe(201);
+      const clientId = first.body.client.id as string;
+
+      // A genuinely separate enquiry from a client Podium already knows.
+      const secondLead = await createLead(`e2e BUG-007 — client reuse B ${RUN}`);
+      const second = await post(`/api/leads/${secondLead}/convert`, founder, {
+        ...conversionBody("reuse-b"),
+        clientName: undefined,
+        clientId,
+      });
+      expect(second.status).toBe(201);
+      expect(second.body.alreadyConverted).toBe(false);
+      expect(second.body.client.id).toBe(clientId);
+      expect(second.body.project.id).not.toBe(first.body.project.id);
+    });
+  });
+
+  /**
+   * RESTORING an archived conversion, which is where the invariant is met from
+   * the other direction: archiving frees the lead to convert again, so the
+   * archived project and the new one both claim the same conversion.
+   *
+   * The database refuses it. What matters here is that a person never sees
+   * that refusal — a P2002 naming an index is a 500 that reads like a Podium
+   * bug rather than the decision it actually is.
+   */
+  describe("restoring an archived conversion", () => {
+    async function archiveThenReconvert() {
+      const leadId = await createLead(`e2e BUG-007 — restore ${RUN}-${Math.random().toString(36).slice(2, 7)}`);
+      const a = await post(`/api/leads/${leadId}/convert`, founder, conversionBody("restore-a"));
+      expect(a.status).toBe(201);
+      expect((await del(`/api/projects/${a.body.project.id}`, founder)).status).toBe(200);
+      const b = await post(`/api/leads/${leadId}/convert`, founder, conversionBody("restore-b"));
+      expect(b.status).toBe(201);
+      expect(b.body.project.id).not.toBe(a.body.project.id);
+      return { leadId, a: a.body.project, b: b.body.project };
+    }
+
+    it("is refused as a domain conflict, not a database error", async () => {
+      const { a, b } = await archiveThenReconvert();
+
+      const res = await post(`/api/projects/${a.id}/restore`, founder);
+      expect(res.status).toBe(409);
+
+      // The API's standard envelope is { error: { code, message, details } }
+      // (HttpExceptionFilter). Reading res.body.message instead returns "" and
+      // every assertion below passes vacuously — which it did on first run.
+      expect(res.body.error.code).toBe("CONFLICT");
+      const message = String(res.body.error.message ?? "");
+      expect(message).not.toBe("");
+      // It must say what is in the way and what to do about it...
+      expect(message).toContain(b.name);
+      expect(message).toContain(b.id);
+      expect(message).toMatch(/archive that one first/i);
+      // ...and it must not leak the schema. The index name, the Prisma error
+      // code and the column name are all implementation detail.
+      expect(message).not.toMatch(/projects_one_live_conversion_per_lead|P2002|Unique constraint|converted_from_lead_id/i);
+    });
+
+    it("leaves both projects exactly as they were", async () => {
+      const { leadId, a, b } = await archiveThenReconvert();
+      await post(`/api/projects/${a.id}/restore`, founder);
+
+      const after = await prisma.project.findMany({ where: { convertedFromLeadId: leadId }, orderBy: { createdAt: "asc" } });
+      expect(after).toHaveLength(2);
+      expect(after[0]!.id).toBe(a.id);
+      expect(after[0]!.deletedAt).not.toBeNull(); // still archived — the refusal changed nothing
+      expect(after[1]!.id).toBe(b.id);
+      expect(after[1]!.deletedAt).toBeNull();
+    });
+
+    it("succeeds once the occupying project is archived in its turn", async () => {
+      const { a, b } = await archiveThenReconvert();
+
+      expect((await del(`/api/projects/${b.id}`, founder)).status).toBe(200);
+      const res = await post(`/api/projects/${a.id}/restore`, founder);
+      expect(res.status).toBe(201);
+      expect((await prisma.project.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).toBeNull();
+    });
+
+    it("restores a project that never came from a conversion without any of this applying", async () => {
+      const created = await post("/api/projects", founder, {
+        name: `e2e BUG-007 — ordinary project ${RUN}`,
+        clientId: (await prisma.client.findFirstOrThrow({ where: { deletedAt: null } })).id,
+        type: "Corporate",
+        cityId,
+        eventDate: "2027-09-09",
+        pmId,
+      });
+      expect(created.status).toBe(201);
+      expect((await del(`/api/projects/${created.body.id}`, founder)).status).toBe(200);
+      expect((await post(`/api/projects/${created.body.id}/restore`, founder)).status).toBe(201);
+    });
+
+    it("two simultaneous restores of two archived conversions cannot both win", async () => {
+      // Both were converted from the same lead and both are archived, so the
+      // live slot is empty and each passes the pre-check. Only the index can
+      // separate them — and the loser must still get a 409, not a 500.
+      const leadId = await createLead(`e2e BUG-007 — restore race ${RUN}`);
+      const a = await post(`/api/leads/${leadId}/convert`, founder, conversionBody("race-a"));
+      await del(`/api/projects/${a.body.project.id}`, founder);
+      const b = await post(`/api/leads/${leadId}/convert`, founder, conversionBody("race-b"));
+      await del(`/api/projects/${b.body.project.id}`, founder);
+
+      const results = await Promise.all([
+        post(`/api/projects/${a.body.project.id}/restore`, founder),
+        post(`/api/projects/${b.body.project.id}/restore`, founder),
+      ]);
+
+      const statuses = results.map((r) => r.status).sort();
+      expect(statuses).toEqual([201, 409]);
+      expect(await prisma.project.count({ where: { convertedFromLeadId: leadId, deletedAt: null } })).toBe(1);
+    });
   });
 
   it("a repeat does not re-apply the playbook's tasks and flows", async () => {

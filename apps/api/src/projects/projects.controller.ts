@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { createProjectSchema, updateProjectSchema } from "@podium/shared-types";
 import { Audit } from "../common/decorators/audit.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -35,5 +35,25 @@ export class ProjectsController {
   @Audit("project", "project.update")
   update(@CurrentUser() user: RequestUser, @Param("id") id: string, @Body(new ZodValidationPipe(updateProjectSchema)) body: ReturnType<typeof updateProjectSchema.parse>) {
     return this.projects.update(user, id, body);
+  }
+
+  /** Archive (soft delete). Nothing is destroyed — see ProjectsService.archive. */
+  @Delete(":id")
+  @RequirePermissions("projects:delete")
+  @Audit("project", "project.archived")
+  archive(@CurrentUser() user: RequestUser, @Param("id") id: string) {
+    return this.projects.archive(user, id);
+  }
+
+  /**
+   * Un-archive. Returns 409, never a raw constraint error, when the project's
+   * lead has been converted again in the meantime — see
+   * ProjectsService.restore.
+   */
+  @Post(":id/restore")
+  @RequirePermissions("projects:delete")
+  @Audit("project", "project.restored")
+  restore(@CurrentUser() user: RequestUser, @Param("id") id: string) {
+    return this.projects.restore(user, id);
   }
 }
