@@ -32,7 +32,8 @@
     "configure:letterhead": "ts-node --transpile-only -P scripts/tsconfig.json scripts/configure-workspace-letterhead.ts",
     "import:event-calendar": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-event-calendar.ts",
     "backfill:products-permissions": "ts-node --transpile-only -P scripts/tsconfig.json scripts/backfill-products-permissions.ts",
-    "classify:automation": "ts-node --transpile-only -P scripts/tsconfig.json scripts/classify-automation-rules.ts"
+    "classify:automation": "ts-node --transpile-only -P scripts/tsconfig.json scripts/classify-automation-rules.ts",
+    "backfill:restricted-hr-permissions": "ts-node --transpile-only -P scripts/tsconfig.json scripts/backfill-restricted-hr-permissions.ts"
   },
   "devDependencies": {
     "@prisma/client": "^5.22.0",
