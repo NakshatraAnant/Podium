@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { Prisma, type PrismaClient } from "@podium/db";
 import { randomUUID } from "crypto";
 import type { CreateAdjustmentNoteInput, CreateInvoiceInput, RecordPaymentInput } from "@podium/shared-types";
+import { businessDateString, endOfBusinessDay } from "../common/business-time";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { MailService } from "../common/mail/mail.service";
 import { PrismaService } from "../common/prisma/prisma.service";
@@ -396,11 +397,32 @@ export class InvoicesService {
    * the same code path is what the e2e test drives.
    */
   async sweepOverdue(now: Date = new Date()): Promise<{ transitioned: number; invoiceIds: string[] }> {
+    /**
+     * TIMEZONE (found 2026-09-16 while auditing what the dormant worker owns).
+     *
+     * `dueDate: { lt: now }` was wrong by a day, every time. Due dates arrive
+     * as `2026-09-16` and `z.coerce.date()` stores them as midnight **UTC**,
+     * which is 05:30 in Jaipur — so at 06:00 IST on the very morning an
+     * invoice falls due, this marked it OVERDUE and told the PM a client who
+     * still had a full working day was late.
+     *
+     * A due date is a calendar date, not an instant. "Past due" means past the
+     * end of that day where AMM works, so the comparison is made against the
+     * end of the business day. Nothing about the stored value changes; only
+     * the boundary it is compared to.
+     */
+    const cutoff = endOfBusinessDay(now);
+    // endOfBusinessDay(now) is the end of TODAY in business time, so an
+    // invoice due today (stored at today's business-midnight) sorts before it
+    // and would still be caught. Step back a whole business day: only invoices
+    // whose due date is strictly before today's business date are late.
+    const lastClosedDay = new Date(cutoff.getTime() - 86_400_000);
     const due = await this.prisma.client.invoice.findMany({
       where: {
         deletedAt: null,
         status: { in: ["ISSUED", "PARTIALLY_PAID"] },
-        dueDate: { lt: now },
+        // Every invoice whose business day has closed before `now`.
+        dueDate: { lte: lastClosedDay },
       },
       include: { project: true, client: true },
     });
@@ -414,7 +436,7 @@ export class InvoicesService {
         // status filter in the update makes that a no-op rather than a
         // regression from PAID back to OVERDUE.
         const updated = await tx.invoice.updateMany({
-          where: { id: invoice.id, status: { in: ["ISSUED", "PARTIALLY_PAID"] }, dueDate: { lt: now } },
+          where: { id: invoice.id, status: { in: ["ISSUED", "PARTIALLY_PAID"] }, dueDate: { lte: lastClosedDay } },
           data: { status: "OVERDUE" },
         });
         if (updated.count === 0) return;
@@ -440,7 +462,9 @@ export class InvoicesService {
               workspaceId: invoice.workspaceId,
               userId: invoice.project.pmId,
               icon: "⚠",
-              text: `Invoice ${invoice.invoiceNo} (${invoice.client.name}) is overdue — due ${invoice.dueDate.toISOString().slice(0, 10)}.`,
+              // Rendered in business time: toISOString() shows the UTC date,
+              // which for a date stored near a day boundary is the wrong day.
+              text: `Invoice ${invoice.invoiceNo} (${invoice.client.name}) is overdue — due ${businessDateString(invoice.dueDate)}.`,
               sourceType: "invoice",
               sourceId: invoice.id,
             },

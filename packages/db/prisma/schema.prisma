@@ -1035,6 +1035,29 @@ model FlowStep {
   startedAt      DateTime?      @map("started_at")
   doneAt         DateTime?      @map("done_at")
   note           String?
+
+  /// BUG-005. Escalation is a FLAG on the step, never the step's status.
+  ///
+  /// It used to be a status: the SLA sweep set `status = ESCALATED`, which
+  /// overwrote READY or ACTIVE and destroyed the only record of where the
+  /// work had got to. Worse, `startStep` requires READY and `completeStep`
+  /// requires READY or ACTIVE, so escalating a step made it permanently
+  /// impossible to start or finish — a notification mechanism silently
+  /// removed the work item from the workflow.
+  ///
+  /// `escalationLevel` is 0 until the first breach, then 1, 2, 3 as the
+  /// breach deepens. It is what makes the sweep idempotent: a level is acted
+  /// on only when it is HIGHER than the level already recorded, so re-running
+  /// the same sweep over the same step does nothing a second time.
+  ///
+  /// The FlowStepStatus.ESCALATED enum value is deliberately kept. Historic
+  /// flow_step_runs rows record transitions *to* ESCALATED and must stay
+  /// readable; nothing sets it as a step's status any more.
+  escalatedAt     DateTime?     @map("escalated_at")
+  escalationLevel Int           @default(0) @map("escalation_level")
+  /// The risk raised by the first escalation, so deeper levels sharpen that
+  /// same risk instead of raising a new one per level.
+  escalationRiskId String?      @map("escalation_risk_id") @db.Uuid
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
   deletedAt      DateTime?      @map("deleted_at")

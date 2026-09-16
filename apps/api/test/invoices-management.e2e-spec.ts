@@ -106,6 +106,58 @@ describe("Invoices — management (e2e)", () => {
       }
     });
 
+    /**
+     * TIMEZONE (BUG found 2026-09-16 while auditing the dormant worker).
+     *
+     * Due dates arrive as `2026-09-16` and are stored as midnight UTC, which
+     * is 05:30 in Jaipur. The sweep compared `dueDate < now`, so at any time
+     * after 05:30 IST **on the morning an invoice fell due** it was marked
+     * OVERDUE and the PM was told a client who still had a full working day
+     * was late. Every invoice, every time.
+     *
+     * The clock is injected here rather than mocked: these are the two
+     * instants that matter either side of the boundary.
+     */
+    it("is not overdue during the business day it falls due, in IST", async () => {
+      const dueDate = new Date("2027-03-15"); // stored 2027-03-15T00:00:00Z
+      const id = await createDraft({ dueDate });
+      expect((await post(`/api/invoices/${id}/issue`)).status).toBe(201);
+
+      // 09:00 IST on the 15th — the day it is due, and a working day.
+      const duringTheDueDay = new Date("2027-03-15T03:30:00Z");
+      const result = await app.get(InvoicesService).sweepOverdue(duringTheDueDay);
+      expect(result.invoiceIds).not.toContain(id);
+      expect((await prisma.invoice.findUniqueOrThrow({ where: { id } })).status).toBe("ISSUED");
+    });
+
+    it("becomes overdue once that business day has closed", async () => {
+      const dueDate = new Date("2027-03-15");
+      const id = await createDraft({ dueDate });
+      expect((await post(`/api/invoices/${id}/issue`)).status).toBe(201);
+
+      // 00:30 IST on the 16th — the 15th is over in Jaipur.
+      const afterTheDueDay = new Date("2027-03-15T19:00:00Z");
+      const result = await app.get(InvoicesService).sweepOverdue(afterTheDueDay);
+      expect(result.invoiceIds).toContain(id);
+      expect((await prisma.invoice.findUniqueOrThrow({ where: { id } })).status).toBe("OVERDUE");
+    });
+
+    it("tells the PM the due date as it reads in India, not in UTC", async () => {
+      // 20:00 UTC on the 15th is 01:30 IST on the 16th. A date-only due date
+      // never lands here, but a datetime one does, and toISOString() would
+      // tell the PM the wrong day. Chosen precisely because the two renderings
+      // disagree — against the same date at midnight UTC this assertion
+      // passes whichever way the code renders it, and proves nothing.
+      const id = await createDraft({ dueDate: new Date("2027-03-15T20:00:00Z") });
+      expect((await post(`/api/invoices/${id}/issue`)).status).toBe(201);
+      await app.get(InvoicesService).sweepOverdue(new Date("2027-03-20T00:00:00Z"));
+
+      const note = await prisma.notification.findFirst({ where: { sourceType: "invoice", sourceId: id } });
+      expect(note).not.toBeNull();
+      expect(note!.text).toContain("2027-03-16");
+      expect(note!.text).not.toContain("2027-03-15");
+    });
+
     it("never drags a PAID invoice back to OVERDUE, even past its due date", async () => {
       const id = await createDraft({ dueDate: new Date(Date.now() - 3 * 86400000), rate: 10000 });
       expect((await post(`/api/invoices/${id}/issue`)).status).toBe(201);

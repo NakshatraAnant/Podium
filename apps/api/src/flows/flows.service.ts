@@ -177,6 +177,31 @@ export class FlowsService {
       if (step.status !== "READY" && step.status !== "ACTIVE") {
         throw new BadRequestException(`Step is ${step.status} — cannot complete.`);
       }
+
+      /**
+       * BUG-006. Lock every step of this flow instance before touching any of
+       * them, so two completions in the same flow are serialised.
+       *
+       * Without it, an AND-join silently breaks. Steps B and C both feed D.
+       * Alice completes B while Bob completes C. At READ COMMITTED each
+       * transaction reads the other's step as still open — each snapshot was
+       * taken before the other committed — so each concludes D's dependencies
+       * are unmet and neither unlocks it. **D never becomes READY and the flow
+       * stalls forever**, with nothing anywhere recording that it happened.
+       *
+       * The mirror-image interleaving is no better: if both DO see each other
+       * as complete, both unlock D, and D gets two READY transitions, two
+       * flow_step_runs rows, two notifications and two bot messages.
+       *
+       * Ordering by id makes the lock order deterministic, so two completions
+       * in the same instance can never deadlock against each other.
+       */
+      await tx.$queryRaw`
+        SELECT "id" FROM "flow_steps"
+         WHERE "flow_instance_id" = ${step.flowInstanceId}::uuid
+           AND "deleted_at" IS NULL
+         ORDER BY "id"
+           FOR UPDATE`;
       const now = new Date();
       await tx.flowStep.update({
         where: { id: step.id },
@@ -198,7 +223,21 @@ export class FlowsService {
       }
 
       for (const n of unlocked) {
-        await tx.flowStep.update({ where: { id: n.id }, data: { status: "READY", readyAt: now } });
+        /**
+         * Guarded on LOCKED, and the guard is load-bearing rather than
+         * decorative: it is the second half of the BUG-006 fix. The lock above
+         * serialises completions within one instance, and this makes the
+         * unlock itself conditional, so anything that still managed to arrive
+         * twice — a retry, a future code path, a step unlocked by a different
+         * transaction — writes once. A count of 0 means somebody else already
+         * unlocked this step, and the notification must not be sent again.
+         */
+        const unlockedNow = await tx.flowStep.updateMany({
+          where: { id: n.id, status: "LOCKED" },
+          data: { status: "READY", readyAt: now },
+        });
+        if (unlockedNow.count === 0) continue;
+
         await tx.flowStepRun.create({ data: { stepId: n.id, fromStatus: "LOCKED", toStatus: "READY", actorId: null } });
         const text = `Your turn: "${n.name}" is ready — ${step.flowInstance.name}. ${step.name} is done.${note ? " Note: " + note : ""}`;
         await this.notifyAndBotDm(tx, step.flowInstance.project.workspaceId, n.ownerId, "⇢", text, step.flowInstance.projectId);
