@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 import type { CreateProjectInput, UpdateProjectInput } from "@podium/shared-types";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
+import { SAFE_USER_INCLUDE, SAFE_USER_SELECT } from "../common/safe-user";
 import type { RequestUser } from "../common/types";
 
 @Injectable()
@@ -15,7 +16,7 @@ export class ProjectsService {
     const scope = this.cityScope.scopeFilter(user, cityId);
     return this.prisma.client.project.findMany({
       where: { workspaceId: user.workspaceId, deletedAt: null, ...scope },
-      include: { client: true, city: true, pm: true },
+      include: { client: true, city: true, pm: { select: SAFE_USER_SELECT } },
       orderBy: { eventDate: "asc" },
     });
   }
@@ -26,8 +27,8 @@ export class ProjectsService {
       include: {
         client: true,
         city: true,
-        pm: true,
-        members: { include: { user: true } },
+        pm: { select: SAFE_USER_SELECT },
+        members: { include: { user: SAFE_USER_INCLUDE } },
         vendors: { include: { vendor: true } },
         tasks: true,
         risks: true,

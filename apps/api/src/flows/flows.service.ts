@@ -3,6 +3,7 @@ import type { PrismaClient } from "@podium/db";
 import type { InstantiateFlowInput } from "@podium/shared-types";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
+import { SAFE_USER_SELECT } from "../common/safe-user";
 import type { RequestUser } from "../common/types";
 
 type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
@@ -53,7 +54,7 @@ export class FlowsService {
   async getInstance(user: RequestUser, id: string) {
     const instance = await this.prisma.client.flowInstance.findFirst({
       where: { id, deletedAt: null },
-      include: { steps: { include: { dependsOn: true, owner: true } }, template: true, project: true },
+      include: { steps: { include: { dependsOn: true, owner: { select: SAFE_USER_SELECT } } }, template: true, project: true },
     });
     if (!instance) throw new NotFoundException("Flow not found.");
     this.cityScope.assertCanAccessCity(user, instance.project.cityId);

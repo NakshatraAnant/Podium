@@ -100,6 +100,72 @@ describe("Security: PII in logs, and the forbidden-sheet guard", () => {
  * that silently stopped matching a category would be indistinguishable from
  * one that never covered it.
  */
+/**
+ * BUG-004. Prisma's `include: { pm: true }` returns EVERY scalar on the
+ * related row, and User carries `passwordHash` — so GET /api/projects was
+ * serving project managers' bcrypt hashes to anyone holding `projects:view`.
+ * Confirmed against production on 2026-09-16 before the fix.
+ *
+ * These assertions deliberately inspect the HTTP RESPONSE BODY rather than
+ * the select constant. A future contributor who writes `include: { user: true }`
+ * in a new service will not have read common/safe-user.ts — but they will
+ * still fail this test, because the hash would appear in the payload.
+ */
+describe("No credential material leaves the API (BUG-004)", () => {
+  let app: INestApplication;
+  let token: string;
+
+  beforeAll(async () => {
+    app = await bootstrapTestApp();
+    token = await loginAs(app, "anant.sharma@ammbrands.in"); // Founder — widest possible view
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  const get = (path: string) => request(app.getHttpServer()).get(path).set("Authorization", `Bearer ${token}`);
+
+  /** Every column on User that must never appear in a response body. */
+  const FORBIDDEN = ["passwordHash", "password_hash", "googleSub", "failedLoginAttempts", "lockedUntil"];
+
+  const assertClean = (label: string, body: unknown) => {
+    const raw = JSON.stringify(body);
+    const found = FORBIDDEN.filter((f) => raw.includes(f));
+    expect([label, found]).toEqual([label, []]);
+  };
+
+  it("does not leak the PM's credential fields from the projects list", async () => {
+    const res = await get("/api/projects");
+    expect(res.status).toBe(200);
+    assertClean("GET /projects", res.body);
+  });
+
+  it("does not leak credential fields from a project's detail, members included", async () => {
+    const list = await get("/api/projects");
+    const first = (list.body as Array<{ id: string }>)[0];
+    // Only meaningful when a project exists; the seeded fixture always has some.
+    expect(first).toBeDefined();
+    const res = await get(`/api/projects/${first!.id}`);
+    expect(res.status).toBe(200);
+    assertClean("GET /projects/:id", res.body);
+  });
+
+  it("does not leak a flow step owner's credential fields", async () => {
+    const res = await get("/api/flow-instances");
+    expect(res.status).toBe(200);
+    assertClean("GET /flow-instances", res.body);
+  });
+
+  it("still returns the fields the UI genuinely needs", async () => {
+    const res = await get("/api/projects");
+    const pm = (res.body as Array<{ pm?: Record<string, unknown> }>)[0]?.pm;
+    expect(pm).toBeDefined();
+    // A redaction that broke the screen would be its own bug.
+    expect(Object.keys(pm!).sort()).toEqual(["dept", "email", "id", "isActive", "name"]);
+  });
+});
+
 describe("Forbidden credentials sheet guard", () => {
   // Imported lazily so this file has no hard dependency on the import script's
   // runtime (it talks to Prisma at module load).
