@@ -274,6 +274,7 @@ async function main() {
   // Credentials are held in memory only until they are written to the 0600
   // file at the end. They are never printed and never stored in the database.
   const credentials: Array<{ name: string; email: string; role: string; password: string }> = [];
+  let removedDependents: Record<string, number> = {};
 
   await prisma.$transaction(async (tx) => {
     // Dehradun is real — AMM has staff there — but was never in the seeded
@@ -297,11 +298,32 @@ async function main() {
     );
 
     // Remove superseded people. Child rows first.
+    //
+    // Everything that REFERENCES one of these users has to go with them, or
+    // the delete fails on a foreign key — which is exactly what happened
+    // against podium_prod, where the business wipe had not run and 15
+    // attendance rows, 4 leaves, 4 messages and a licence still pointed at
+    // the fixture accounts. Scoped strictly to rows belonging to the users
+    // being removed: a fixture user's attendance record is itself fixture
+    // data, but nobody else's is touched.
     const removeIds = toRemove.map((u) => u.id);
     if (removeIds.length > 0) {
-      await tx.userRole.deleteMany({ where: { userId: { in: removeIds } } });
-      await tx.userCityAccess.deleteMany({ where: { userId: { in: removeIds } } });
-      await tx.refreshToken.deleteMany({ where: { userId: { in: removeIds } } });
+      const owned = { userId: { in: removeIds } };
+      const dependents = {
+        attendance: await tx.attendance.deleteMany({ where: owned }),
+        leaves: await tx.leave.deleteMany({ where: owned }),
+        messages: await tx.message.deleteMany({ where: { authorId: { in: removeIds } } }),
+        // Licence.ownerId is non-nullable, so there is no orphan to leave
+        // behind — a compliance licence owned by a fixture user is itself
+        // fixture data, and the business wipe removes licences anyway.
+        licences: await tx.licence.deleteMany({ where: { ownerId: { in: removeIds } } }),
+        refreshTokens: await tx.refreshToken.deleteMany({ where: owned }),
+        userRoles: await tx.userRole.deleteMany({ where: owned }),
+        userCityAccess: await tx.userCityAccess.deleteMany({ where: owned }),
+      };
+      removedDependents = Object.fromEntries(
+        Object.entries(dependents).filter(([, r]) => r.count > 0).map(([k, r]) => [k, r.count]),
+      );
       await tx.user.deleteMany({ where: { id: { in: removeIds } } });
     }
     await tx.freelancer.deleteMany({});
@@ -366,6 +388,9 @@ async function main() {
   ].join("\n");
   fs.writeFileSync(outFile, `${csv}\n`, { mode: 0o600 });
 
+  if (Object.keys(removedDependents).length > 0) {
+    console.log(`\nRows removed with the superseded accounts: ${Object.entries(removedDependents).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+  }
   console.log(`\nProvisioned ${credentials.length} account(s).`);
   console.log(`Credentials written to ${outFile} (mode 0600, outside the repo, not logged).`);
 

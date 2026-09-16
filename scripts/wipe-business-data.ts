@@ -65,6 +65,11 @@ const BUSINESS_TABLES = [
   "project_vendors", "project_members", "projects",
   // --- compliance tied to a project
   "licences",
+  // --- the sellable catalogue. Business data, not configuration: every row
+  // is imported from a source workbook and re-derived on the next import, so
+  // it belongs to the same "rebuild from the source of truth" contract as
+  // clients and leads. The BRANDS that own them are configuration and stay.
+  "products",
   // --- the CRM itself
   "client_contacts", "clients", "leads",
   // --- counterparties + crew
@@ -107,6 +112,9 @@ const IDENTITY_TABLES = [
 const SYSTEM_TABLES = [
   "_prisma_migrations",
   "workspaces", "cities", "gst_state_codes", "invoice_counters",
+  // Two trading entities under one LLP — a fixed fact about the business,
+  // like its cities, not a record of work done.
+  "brands",
   "permissions", "role_permissions", "roles",
   "automation_rules",
   "flow_templates", "playbooks",
