@@ -31,7 +31,8 @@
     "import:products": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-products.ts",
     "configure:letterhead": "ts-node --transpile-only -P scripts/tsconfig.json scripts/configure-workspace-letterhead.ts",
     "import:event-calendar": "ts-node --transpile-only -P scripts/tsconfig.json scripts/import-event-calendar.ts",
-    "backfill:products-permissions": "ts-node --transpile-only -P scripts/tsconfig.json scripts/backfill-products-permissions.ts"
+    "backfill:products-permissions": "ts-node --transpile-only -P scripts/tsconfig.json scripts/backfill-products-permissions.ts",
+    "classify:automation": "ts-node --transpile-only -P scripts/tsconfig.json scripts/classify-automation-rules.ts"
   },
   "devDependencies": {
     "@prisma/client": "^5.22.0",
