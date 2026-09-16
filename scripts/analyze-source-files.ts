@@ -16,7 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as XLSX from "xlsx";
-import { isForbiddenSheet, sensitiveColumnCategory } from "./forbidden-sheet";
+import { blockedKeysIn, isForbiddenSheet } from "./forbidden-sheet";
 
 const UPLOADS = process.env.PODIUM_IMPORT_DIR ?? "/root/.claude/uploads/3f727242-cd2a-50a4-8be4-56242dfab268";
 
@@ -61,11 +61,17 @@ for (const { label, file } of FILES) {
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
     const headers = rows.length > 0 ? Object.keys(rows[0]!) : [];
 
-    const excluded = headers.map((h) => ({ h, cat: sensitiveColumnCategory(h) })).filter((c) => c.cat !== null);
-    const safe = headers.filter((h) => sensitiveColumnCategory(h) === null);
+    // Not `sensitiveColumnCategory(header)`: half of AMM's sheets put their
+    // real titles in a data row, so the keys here are `__EMPTY_n` and a
+    // header-only check reads salary and Aadhaar columns believing the sheet
+    // is clean. `blockedKeysIn` looks at the heading row wherever it is.
+    const { keys: blocked, matches } = blockedKeysIn(rows, 3);
+    const safe = headers.filter((h) => !blocked.has(h));
 
     console.log(`\n  -- "${name}" -- ${rows.length} data rows, ${headers.length} columns`);
-    for (const { h, cat } of excluded) console.log(`     EXCLUDED COLUMN  "${h}"  [${cat}] — values never read`);
+    for (const m of matches) {
+      console.log(`     EXCLUDED COLUMN  "${m.key}" (heading "${m.text}")  [${m.category}] — values never read`);
+    }
 
     for (const header of safe) {
       const filled = rows.filter((r) => r[header] !== null && r[header] !== "");

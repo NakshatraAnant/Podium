@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import * as XLSX from "xlsx";
-import { isForbiddenSheet, sensitiveColumnCategory } from "./forbidden-sheet";
+import { blockedKeysIn, isForbiddenSheet } from "./forbidden-sheet";
 
 const UPLOADS = process.env.PODIUM_IMPORT_DIR ?? "/root/.claude/uploads/3f727242-cd2a-50a4-8be4-56242dfab268";
 const ELIXIR_PRODUCTS = path.join(UPLOADS, process.env.PODIUM_ELIXIR_PRODUCTS ?? "4565ce3a-products.json");
@@ -166,13 +166,10 @@ function readCocktailShop(): { rows: Row[]; stats: Record<string, number>; exclu
   if (!sheet) throw new Error(`no "Master Product List" sheet in ${path.basename(TCS_PRODUCTS)}`);
 
   const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(book.Sheets[sheet]!, { defval: null });
-  const headers = raw.length > 0 ? Object.keys(raw[0]!) : [];
   const excluded = [...refused.map((r) => `sheet "${r}"`)];
-  for (const h of headers) {
-    const category = sensitiveColumnCategory(h);
-    if (category) excluded.push(`column "${h}" [${category}]`);
-  }
-  const blocked = new Set(headers.filter((h) => sensitiveColumnCategory(h) !== null));
+  // Checks the heading row wherever it actually is — see blockedKeysIn.
+  const { keys: blocked, matches } = blockedKeysIn(raw, 3);
+  for (const m of matches) excluded.push(`column "${m.key}" (heading "${m.text}") [${m.category}]`);
   const pick = (r: Record<string, unknown>, key: string) => (blocked.has(key) ? null : r[key]);
 
   const rows: Row[] = [];

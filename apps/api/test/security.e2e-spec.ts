@@ -171,14 +171,26 @@ describe("Forbidden credentials sheet guard", () => {
   // runtime (it talks to Prisma at module load).
   let assertNotForbidden: (name: string) => void;
   let sensitiveColumnCategory: (header: string) => string | null;
+  let blockedColumnsIn: (
+    grid: ReadonlyArray<ReadonlyArray<unknown>>,
+    scanRows?: number,
+  ) => { indices: Set<number>; matches: Array<{ index: number; text: string; category: string }> };
+  let blockedKeysIn: (
+    rows: ReadonlyArray<Record<string, unknown>>,
+    scanRows?: number,
+  ) => { keys: Set<string>; matches: Array<{ key: string; text: string; category: string }> };
 
   beforeAll(async () => {
     const mod = (await import("../../../scripts/forbidden-sheet")) as unknown as {
       assertNotForbidden: (n: string) => void;
       sensitiveColumnCategory: (h: string) => string | null;
+      blockedColumnsIn: typeof blockedColumnsIn;
+      blockedKeysIn: typeof blockedKeysIn;
     };
     assertNotForbidden = mod.assertNotForbidden;
     sensitiveColumnCategory = mod.sensitiveColumnCategory;
+    blockedColumnsIn = mod.blockedColumnsIn;
+    blockedKeysIn = mod.blockedKeysIn;
   });
 
   it("throws on the exact sheet name from the AMM workbook", () => {
@@ -244,6 +256,118 @@ describe("Forbidden credentials sheet guard", () => {
     for (const name of ["AMM CLIENT DATABASE", "Clients", "AMM EMPLOYEE DATA", "DATA DUMP", "Sales Funnel"]) {
       expect(() => assertNotForbidden(name)).not.toThrow();
     }
+  });
+
+  /**
+   * REGRESSION — 2026-09-16, the guard's second miss in one day.
+   *
+   * AMM's own HR master spells Aadhaar "Adhar Card". The pattern insisted on
+   * the canonical double-a, so a column of government-ID scan links scanned
+   * clean. Every spelling that turns up in Indian office documents is pinned
+   * here; the two negatives below are the reason the pattern cannot simply be
+   * loosened to /ADH/.
+   */
+  it("matches every AMM spelling of Aadhaar, and still leaves ADDRESS alone", () => {
+    for (const header of [
+      "Adhar Card",
+      "Aadhaar",
+      "Aadhar",
+      "Adhaar",
+      "AADHAR NO",
+      "aadhar number",
+      "Aadhaar Card Link",
+    ]) {
+      expect([header, sensitiveColumnCategory(header)]).toEqual([header, "government-id"]);
+    }
+    for (const header of ["ADDRESS", "Address Line 2", "Adhesive Tape"]) {
+      expect([header, sensitiveColumnCategory(header)]).toEqual([header, null]);
+    }
+  });
+
+  /**
+   * REGRESSION — full-and-final settlement columns. "F&F Net Payable" matched
+   * only by accident (NET PAY); "F&F Gross" and "Deductions/Recovery" sat
+   * beside it in the same sheet and did not match at all.
+   */
+  it("treats full-and-final settlement columns as pay", () => {
+    for (const header of ["F&F Gross", "F & F Net Payable", "Deductions/Recovery", "Full and Final", "Arrears"]) {
+      expect([header, sensitiveColumnCategory(header)]).toEqual([header, "salary"]);
+    }
+  });
+
+  /**
+   * REGRESSION — the guard's first miss of 2026-09-16, and the more serious
+   * one. `Master_Sheet.xlsx`'s "Employee Deatils" sheet puts its real titles
+   * in a data row, so `sheet_to_json` invents `__EMPTY_1`-style keys and a
+   * header-only check reads salary, bank and Aadhaar columns while believing
+   * the sheet is clean. This grid is that sheet's actual shape.
+   */
+  it("finds sensitive columns when the real header is not row 0", () => {
+    const grid = [
+      ["EMPLOYEE MASTER — AMM BRANDS LLP", null, null, null, null, null, null, null],
+      ["EMP ID", "SALARY DETAILS", null, null, null, "SALARY DETAILS", "Bank Details", "Adhar Card"],
+      ["AMM-001", "CTC", "Basic", "HRA", "Net", "In-Hand", "Bank A/C No", "Aadhaar No"],
+      ["AMM-002", "xxx", "xxx", "xxx", "xxx", "xxx", "xxx", "xxx"],
+    ];
+    const blocked = blockedColumnsIn(grid, 3);
+    expect([...blocked.indices].sort((a, b) => a - b)).toEqual([1, 5, 6, 7]);
+    expect(blocked.matches.map((m) => m.category).sort()).toContain("government-id");
+  });
+
+  it("does not mistake a long cell for a header — an address naming a bank is data", () => {
+    const grid = [
+      ["CLIENT", "ADDRESS"],
+      ["Rashi Events", "M29, GK2, M Block Market, next to HDFC Bank, New Delhi 110048"],
+    ];
+    expect(blockedColumnsIn(grid, 3).indices.size).toBe(0);
+  });
+
+  /**
+   * REGRESSION — the cost of scanning cell values, which is why the scan is
+   * gated on the row reading as a heading row.
+   *
+   * Both of these are verbatim from AMM_BRANDS_LLP_DATABASE.xlsx: an
+   * influencer whose actual surname is "Adhaar", and a bar whose actual
+   * website is passcodeonly.com. An ungated value scan blocks the name column
+   * of one sheet and the website column of the other — destroying two real
+   * datasets to protect nothing. The phone number in each row is what marks it
+   * as data rather than headings.
+   */
+  it("does not block a real column because a person is named Adhaar", () => {
+    const grid = [
+      ["Name", "Contact", "Address"],
+      ["Shirin Mann", "9582500001", "508-A, Aralias, Sector 42, Gurugram"],
+      ["Sharnamli Adhaar", "9810412521", "3/13 Shanti Niketan, New Delhi"],
+    ];
+    expect(blockedColumnsIn(grid, 3).matches).toEqual([]);
+  });
+
+  it("does not block a real column because a bar's website is passcodeonly.com", () => {
+    const grid = [
+      ["DELHI 17/8/2024", null, null, null],
+      ["Only Bar Restaurant", "011 4039 2018", "16-19 Bhikaji Cama Place", "https://www.onlybar.in/"],
+      ["PCO Bar", "097111 08482", "D-4 Block Market, Vasant Vihar", "https://www.passcodeonly.com/lander"],
+    ];
+    expect(blockedColumnsIn(grid, 3).matches).toEqual([]);
+  });
+
+  /**
+   * The header-keyed form of the same miss. `sheet_to_json` without
+   * `header: 1` keys rows by row 0, so when row 0 is blank the sensitive
+   * titles arrive as VALUES under `__EMPTY_n` keys.
+   */
+  it("blocks __EMPTY keys whose heading row sits in the data", () => {
+    const rows = [
+      { __EMPTY: "NAME", __EMPTY_1: "SALARY DETAILS", __EMPTY_5: "Bank Details", __EMPTY_6: "Adhar Card" },
+      { __EMPTY: "Zumair Bin Zaheer", __EMPTY_1: "34500", __EMPTY_5: "A/C 1234", __EMPTY_6: "https://drive.google.com/x" },
+    ];
+    const blocked = blockedKeysIn(rows, 3);
+    expect([...blocked.keys].sort()).toEqual(["__EMPTY_1", "__EMPTY_5", "__EMPTY_6"]);
+  });
+
+  it("blocks a sensitive key even when row 0 is a proper header", () => {
+    const rows = [{ "Employee ID": "AMM-001", "Monthly Salary": 34500, "Bank A/C No": "1234" }];
+    expect([...blockedKeysIn(rows, 3).keys].sort()).toEqual(["Bank A/C No", "Monthly Salary"]);
   });
 
   it("the guard throws — it must never silently skip", () => {

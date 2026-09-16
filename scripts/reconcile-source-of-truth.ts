@@ -32,7 +32,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import * as XLSX from "xlsx";
-import { isForbiddenSheet, sensitiveColumnCategory } from "./forbidden-sheet";
+import { blockedColumnsIn, isForbiddenSheet } from "./forbidden-sheet";
 import { normalizePhone } from "./import-real-data";
 
 const UPLOADS = process.env.PODIUM_IMPORT_DIR ?? "/root/.claude/uploads/3f727242-cd2a-50a4-8be4-56242dfab268";
@@ -42,9 +42,6 @@ const SOURCE_FILES = [
   { label: "database export", file: "f4544bcd-AMM_BRANDS_LLP_DATABASE_1.xlsx" },
   { label: "sales funnel", file: "8d3abe94-Elixir_New_Clients_Query_1.xlsx" },
 ];
-
-/** Longest string still plausible as a column header; beyond this it is a data value. */
-const HEADER_MAX_CHARS = 40;
 
 const prisma = new PrismaClient();
 
@@ -120,22 +117,15 @@ function buildUniverse(): Universe {
        * sensitive-column detection scans all of them rather than trusting
        * row 0 — a salary column hiding under a merged header must still be
        * excluded.
+       *
+       * This used to be a hand-rolled copy of that scan. It is now the shared
+       * guard: the copy is what let three sensitive columns of the HR master
+       * through on 2026-09-16, because a fix applied in one place never
+       * reached the other.
        */
-      const blocked = new Set<number>();
-      for (const row of grid.slice(0, 3)) {
-        (row as unknown[]).forEach((cellValue, colIdx) => {
-          if (cellValue === null) return;
-          const text = String(cellValue).trim();
-          // Scanning three rows means data rows get considered too, and a
-          // long free-text value is a data row, not a header. Without this
-          // cap a street address reading "... near HSBC Bank, Sector 18"
-          // would blank out an entire legitimate address column.
-          if (text.length > HEADER_MAX_CHARS) return;
-          const category = sensitiveColumnCategory(text);
-          if (!category) return;
-          blocked.add(colIdx);
-          u.exclusions.push({ file, sheet, kind: "column", what: text, category });
-        });
+      const { indices: blocked, matches } = blockedColumnsIn(grid, 3);
+      for (const m of matches) {
+        u.exclusions.push({ file, sheet, kind: "column", what: m.text, category: m.category });
       }
 
       for (const row of grid) {
