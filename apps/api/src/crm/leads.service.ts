@@ -4,6 +4,9 @@ import { AutomationService } from "../automation/automation.service";
 import { CityScopeService } from "../common/city-scope/city-scope.service";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { RequestUser } from "../common/types";
+
+/** The `tx` handle Prisma hands an interactive transaction callback. */
+type PrismaTransaction = Parameters<Parameters<PrismaService["client"]["$transaction"]>[0]>[0];
 import { FlowsService } from "../flows/flows.service";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -92,6 +95,29 @@ export class LeadsService {
   }
 
   /**
+   * BUG-007. The one definition of "this lead has already been converted".
+   *
+   * Live means the project has not been soft-deleted. A project deleted in
+   * error must not lock its lead out of ever being converted again, which is
+   * why the invariant is "at most one VALID ACTIVE conversion" rather than
+   * "at most one ever" — and why the database index behind it is partial.
+   *
+   * `tx` lets the transaction re-ask the same question under its row lock, so
+   * the check that decides and the check that raced cannot drift apart.
+   */
+  private async existingConversion(user: RequestUser, leadId: string, tx?: PrismaTransaction) {
+    const db = tx ?? this.prisma.client;
+    const project = await db.project.findFirst({
+      where: { convertedFromLeadId: leadId, workspaceId: user.workspaceId, deletedAt: null },
+      include: { client: true },
+    });
+    if (!project) return null;
+    const lead = await db.lead.findUniqueOrThrow({ where: { id: leadId } });
+    const { client, ...bare } = project;
+    return { lead, client, project: bare, alreadyConverted: true as const };
+  }
+
+  /**
    * Automation au1, "Deal Won -> Project Auto-Creation" (blueprint §5A):
    * marks the lead Won, creates (or reuses) the client, creates the project,
    * and creates its chat channel — atomically, so a failure partway through
@@ -107,6 +133,23 @@ export class LeadsService {
     const lead = await this.prisma.client.lead.findFirst({ where: { id, workspaceId: user.workspaceId, deletedAt: null } });
     if (!lead) throw new NotFoundException("Lead not found.");
     this.cityScope.assertCanAccessCity(user, lead.cityId);
+
+    /**
+     * BUG-007, layer 1 of 3: answer a repeat without doing any work.
+     *
+     * This runs BEFORE the field validation below on purpose. A retry after a
+     * dropped response, or a browser refresh on the success screen, resends
+     * whatever body it sent the first time; if that body is now judged
+     * incomplete the caller gets a 400 for a conversion that in fact
+     * succeeded, and the UI shows a failure over a real project.
+     *
+     * It is an optimisation, not the guarantee — two simultaneous requests
+     * both reach here before either has written anything. Layers 2 and 3 are
+     * inside the transaction.
+     */
+    const done = await this.existingConversion(user, lead.id);
+    if (done) return done;
+
     if (!input.clientId && !input.clientName) {
       throw new BadRequestException("Provide clientId (existing) or clientName (to create one).");
     }
@@ -125,6 +168,20 @@ export class LeadsService {
     }
 
     const result = await this.prisma.client.$transaction(async (tx) => {
+      /**
+       * Layer 2: serialise. Two conversions of the SAME lead now queue behind
+       * this row lock, so the loser reads the winner's committed project
+       * rather than racing it. Locking the lead (not the project) is what
+       * makes this work — the project it must not duplicate does not exist
+       * yet, so there is nothing else to lock.
+       *
+       * Prisma has no `FOR UPDATE`, hence raw SQL. It is parameterised, and
+       * the id is a uuid that came from a row we just read.
+       */
+      await tx.$queryRaw`SELECT "id" FROM "leads" WHERE "id" = ${lead.id}::uuid FOR UPDATE`;
+      const raced = await this.existingConversion(user, lead.id, tx);
+      if (raced) return raced;
+
       const client = input.clientId
         ? await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
         : await tx.client.create({
@@ -152,6 +209,11 @@ export class LeadsService {
           pmId: input.pmId,
           status: "PLANNING",
           revenue: value,
+          // Layer 3: the invariant itself. Partial unique index
+          // projects_one_live_conversion_per_lead rejects a second live
+          // conversion even if layers 1 and 2 are bypassed entirely — by a
+          // future code path, a background job, or a hand-written INSERT.
+          convertedFromLeadId: lead.id,
           createdById: user.id,
           updatedById: user.id,
         },
@@ -176,8 +238,13 @@ export class LeadsService {
         },
       });
 
-      return { lead: wonLead, client, project };
+      return { lead: wonLead, client, project, alreadyConverted: false };
     });
+
+    // Never re-apply a playbook to a project that already had one applied:
+    // that is how a repeat conversion would still end up duplicating a
+    // project's tasks and flow instances even with the project itself deduped.
+    if (result.alreadyConverted) return result;
 
     if (result.project.playbookId) {
       await this.applyPlaybookDefaults(user, result.project.id, result.project.playbookId, result.project.eventDate, input.pmId);

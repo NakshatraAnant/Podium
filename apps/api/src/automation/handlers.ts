@@ -2,6 +2,9 @@ import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../common/prisma/prisma.service";
 import type { ActionHandler, AutomationEvent, RunOutcome } from "./automation.types";
 
+/** The `tx` handle Prisma hands an interactive transaction callback. */
+type TxClient = Parameters<Parameters<PrismaService["client"]["$transaction"]>[0]>[0];
+
 /**
  * Rule au1 — "Deal Won -> Project Auto-Creation".
  *
@@ -32,9 +35,15 @@ export class DealWonHandler implements ActionHandler {
     });
     if (!lead) return { status: "FAILED", error: "Lead no longer exists." };
 
-    if (lead.convertedProjectId) {
-      return { status: "SUCCESS", detail: { alreadyConverted: true, projectId: lead.convertedProjectId } };
-    }
+    /**
+     * BUG-007. The cheap check — a queue retry of an event that already
+     * produced a project must not produce a second one. It is not the
+     * guarantee: two workers picking up the same event both read `null` here
+     * before either writes. The row lock inside the transaction below and the
+     * partial unique index behind it are what actually hold.
+     */
+    const live = await this.liveConversion(lead.id);
+    if (live) return { status: "SUCCESS", detail: { alreadyConverted: true, projectId: live } };
 
     // Every field a real project needs, checked against the real row.
     const missing: string[] = [];
@@ -68,6 +77,13 @@ export class DealWonHandler implements ActionHandler {
 
     // Everything is present and real: create the project atomically.
     const project = await this.prisma.client.$transaction(async (tx) => {
+      // Serialise against every other conversion path for this lead — this
+      // handler, a second worker running it, and LeadsService.convert(), which
+      // takes the same lock on the same row.
+      await tx.$queryRaw`SELECT "id" FROM "leads" WHERE "id" = ${lead.id}::uuid FOR UPDATE`;
+      const raced = await this.liveConversion(lead.id, tx);
+      if (raced) return null;
+
       const created = await tx.project.create({
         data: {
           workspaceId: event.workspaceId,
@@ -79,6 +95,7 @@ export class DealWonHandler implements ActionHandler {
           pmId: pm!.id,
           status: "PLANNING",
           revenue: lead.value!,
+          convertedFromLeadId: lead.id,
         },
       });
       await tx.lead.update({ where: { id: lead.id }, data: { convertedProjectId: created.id } });
@@ -100,7 +117,27 @@ export class DealWonHandler implements ActionHandler {
       return created;
     });
 
+    if (!project) {
+      const winner = await this.liveConversion(lead.id);
+      return { status: "SUCCESS", detail: { alreadyConverted: true, projectId: winner } };
+    }
     return { status: "SUCCESS", detail: { projectId: project.id, leadId: lead.id } };
+  }
+
+  /**
+   * The id of this lead's live conversion, or null. "Live" excludes a
+   * soft-deleted project deliberately: a project deleted in error must not
+   * leave its lead permanently unconvertible. Mirrors the rule the partial
+   * unique index projects_one_live_conversion_per_lead enforces, and the one
+   * LeadsService.existingConversion() applies.
+   */
+  private async liveConversion(leadId: string, tx?: TxClient): Promise<string | null> {
+    const db = tx ?? this.prisma.client;
+    const project = await db.project.findFirst({
+      where: { convertedFromLeadId: leadId, deletedAt: null },
+      select: { id: true },
+    });
+    return project?.id ?? null;
   }
 }
 

@@ -738,6 +738,10 @@ model Lead {
   owner             User?     @relation("LeadOwner", fields: [ownerId], references: [id])
   city              City?     @relation(fields: [cityId], references: [id])
   convertedClient   Client?   @relation(fields: [convertedClientId], references: [id])
+  /// A list, not a single project, because the partial unique index only
+  /// forbids more than one LIVE conversion — a conversion whose project was
+  /// later deleted stays here as history and does not block a fresh one.
+  conversions       Project[] @relation("LeadConversion")
 
   // Enforces §6/§7 dedupe at the database, not just in the import script.
   @@unique([workspaceId, phone])
@@ -844,6 +848,21 @@ model Project {
   eventDateText String?     @map("event_date_text")
   /// Where the row came from, for rows imported from the event calendar.
   externalRef String?       @map("external_ref")
+  /// BUG-007. The lead this project was converted from — and the database's
+  /// own guarantee that a lead converts at most once.
+  ///
+  /// The guarantee is a PARTIAL unique index,
+  /// `WHERE converted_from_lead_id IS NOT NULL AND deleted_at IS NULL`,
+  /// created in migration 20260916120000_lead_conversion_idempotency. Prisma's
+  /// schema language cannot express a partial index, so it is declared there
+  /// and not here; do not "tidy" this into `@unique`, which would also make a
+  /// soft-deleted project block the lead from ever being converted again.
+  ///
+  /// It has to live on projects rather than on leads.converted_project_id,
+  /// because a second conversion UPDATEs that column on the same lead row —
+  /// there is no second row for an index to reject. Here the second
+  /// conversion is a second INSERT, which the index can and does refuse.
+  convertedFromLeadId String? @map("converted_from_lead_id") @db.Uuid
   pmId        String        @map("pm_id") @db.Uuid
   status      ProjectStatus @default(PLANNING)
   health      ProjectHealth @default(GREEN) // computed, recalculated server-side (blueprint §19) — never client-set
@@ -860,6 +879,7 @@ model Project {
   client          Client            @relation(fields: [clientId], references: [id])
   playbook        Playbook?         @relation(fields: [playbookId], references: [id])
   city            City              @relation(fields: [cityId], references: [id])
+  convertedFromLead Lead?           @relation("LeadConversion", fields: [convertedFromLeadId], references: [id])
   pm              User              @relation("ProjectPM", fields: [pmId], references: [id])
   members         ProjectMember[]
   vendors         ProjectVendor[]
